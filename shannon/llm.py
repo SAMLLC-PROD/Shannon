@@ -67,13 +67,16 @@ def ollama_chat(
         else:
             raise RuntimeError("No Ollama models available. Run: ollama pull qwen2.5:32b")
 
+    # Prepend system prompt as a system-role message (most reliable across models)
+    msgs = messages
+    if system:
+        msgs = [{"role": "system", "content": system}] + list(messages)
+
     payload = {
         "model": model,
-        "messages": messages,
+        "messages": msgs,
         "stream": False,
     }
-    if system:
-        payload["system"] = system
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(

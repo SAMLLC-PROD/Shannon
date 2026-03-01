@@ -26,10 +26,10 @@ from .openclaw import save, generate_context_file
 # Config — paths can be overridden per-user in Pigeon
 # ---------------------------------------------------------------------------
 
-WORKSPACE    = Path(os.environ.get("SHANNON_WORKSPACE", Path.home() / ".openclaw/workspace"))
-SOUL_FILE    = WORKSPACE / "SOUL.md"
-USER_FILE    = WORKSPACE / "USER.md"
-CONTEXT_FILE = WORKSPACE / "memory" / "shannon-context.md"
+DEFAULT_WORKSPACE = Path(os.environ.get("SHANNON_WORKSPACE", str(Path.home() / ".openclaw/workspace")))
+
+
+
 
 
 def _load_file(path: Path, fallback: str = "") -> str:
@@ -39,37 +39,45 @@ def _load_file(path: Path, fallback: str = "") -> str:
     return fallback
 
 
-def build_system_prompt(extra_context: str = "") -> str:
+def build_system_prompt(workspace: Path = None, extra_context: str = "") -> str:
     """
-    Build the agent system prompt from soul + user + LTM context.
-    This is what makes each user's agent uniquely theirs.
+    Build a compact agent system prompt from soul + user + recent LTM.
+    Kept lean so local models stay fast.
     """
-    soul    = _load_file(SOUL_FILE, "You are a helpful assistant.")
-    user    = _load_file(USER_FILE, "")
-    context = _load_file(CONTEXT_FILE, "")
+    ws = Path(os.environ.get("SHANNON_WORKSPACE", str(DEFAULT_WORKSPACE))) if workspace is None else workspace
 
-    parts = [soul]
+    # Compact identity — first 800 chars of SOUL.md (core values only)
+    soul_full = _load_file(ws / "SOUL.md", "You are a helpful personal AI assistant.")
+    soul = soul_full[:800] if len(soul_full) > 800 else soul_full
+
+    # User context — full (it's short)
+    user = _load_file(ws / "USER.md", "")
+
+    # LTM — most recent 3 chunks only (keep it fast)
+    context_full = _load_file(ws / "memory" / "shannon-context.md", "")
+    context = ""
+    if context_full:
+        lines = context_full.split("---")
+        recent = [l.strip() for l in lines if l.strip() and "Shannon Context" not in l]
+        context = "---\n".join(recent[:3])[:1500]
+
+    parts = [
+        f"You are Guy Shannon — a personal AI agent built by Ron Peterson.\n"
+        f"Your memory system is called Project Shannon (Zeckendorf-Fibonacci addressing, QAM encoding, local storage).\n"
+        f"Answer using your memory context below. Ignore any training data about 'Microsoft Shannon' — that is unrelated.\n\n"
+        f"{soul}"
+    ]
 
     if user:
-        parts.append(f"## About the person you're helping\n{user}")
+        parts.append(f"## About Ron\n{user.strip()[:600]}")
 
     if context:
-        # Trim context if very long — keep most recent
-        if len(context) > 6000:
-            context = context[:6000] + "\n\n_[context truncated]_"
-        parts.append(f"## Your long-term memory (Shannon)\n{context}")
+        parts.append(f"## Recent memory (Shannon LTM)\n{context}")
 
     if extra_context:
         parts.append(f"## Additional context\n{extra_context}")
 
-    parts.append(
-        "## Important\n"
-        "You have access to persistent long-term memory via Shannon. "
-        "When the conversation produces something worth remembering — decisions, insights, "
-        "milestones — note it. Be concise. Be direct. Be genuinely helpful."
-    )
-
-    return "\n\n---\n\n".join(parts)
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +99,7 @@ class ShannonAgent:
         shannon_home: Path = None,
     ):
         self.session_id  = session_id or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        self.workspace   = workspace or WORKSPACE
+        self.workspace   = workspace or DEFAULT_WORKSPACE
         self.history: List[Dict] = []
 
         # Override paths if custom workspace
@@ -115,7 +123,7 @@ class ShannonAgent:
         """
         self.history.append({"role": "user", "content": message})
 
-        system = build_system_prompt()
+        system = build_system_prompt(workspace=self.workspace)
 
         result = chat(
             messages=self.history,
