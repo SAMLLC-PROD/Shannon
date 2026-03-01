@@ -4,30 +4,26 @@ Shannon LLM interface — Ollama first, cloud fallback.
 Priority:
   1. Ollama (local, private, free after hardware)
   2. Anthropic Claude (cloud fallback)
-  3. OpenAI (cloud fallback)
 
-The agent should always try local first. Cloud is the escape hatch,
-not the default.
+Both sync and async interfaces provided.
+FastAPI should use the async versions to avoid blocking the event loop.
 """
 
 import os
 import json
 import urllib.request
-import urllib.error
-from typing import Optional, List, Dict, Generator
+from typing import Optional, List, Dict
 
-
-OLLAMA_BASE    = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-DEFAULT_MODEL  = os.environ.get("SHANNON_MODEL", "qwen2.5:7b")
-FAST_MODEL     = os.environ.get("SHANNON_FAST_MODEL", "mistral:7b")
+OLLAMA_BASE   = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+DEFAULT_MODEL = os.environ.get("SHANNON_MODEL", "qwen2.5:7b")
+FAST_MODEL    = os.environ.get("SHANNON_FAST_MODEL", "mistral:7b")
 
 
 # ---------------------------------------------------------------------------
-# Ollama
+# Sync helpers (CLI / scripts)
 # ---------------------------------------------------------------------------
 
 def ollama_available() -> bool:
-    """Check if Ollama is running and reachable."""
     try:
         req = urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=2)
         return req.status == 200
@@ -36,7 +32,6 @@ def ollama_available() -> bool:
 
 
 def ollama_models() -> List[str]:
-    """List available local models."""
     try:
         req = urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=2)
         data = json.loads(req.read())
@@ -45,112 +40,131 @@ def ollama_models() -> List[str]:
         return []
 
 
-def ollama_chat(
-    messages: List[Dict],
-    model: str = None,
-    stream: bool = False,
-    system: str = None,
-) -> str:
-    """
-    Send a chat request to Ollama.
-    Returns the assistant response as a string.
-    """
-    model = model or DEFAULT_MODEL
+def _resolve_model(model: str, available: List[str]) -> str:
+    """Pick best available model, falling back gracefully."""
+    if model in available:
+        return model
+    if DEFAULT_MODEL in available:
+        return DEFAULT_MODEL
+    if FAST_MODEL in available:
+        return FAST_MODEL
+    if available:
+        return available[0]
+    raise RuntimeError("No Ollama models available. Run: ollama pull qwen2.5:7b")
+
+
+def ollama_chat(messages: List[Dict], model: str = None, system: str = None) -> str:
+    """Synchronous Ollama chat — for CLI/scripts only."""
     available = ollama_models()
-
-    # Fallback to fast model if default not pulled yet
-    if model not in available:
-        if FAST_MODEL in available:
-            model = FAST_MODEL
-        elif available:
-            model = available[0]
-        else:
-            raise RuntimeError("No Ollama models available. Run: ollama pull qwen2.5:32b")
-
-    # Prepend system prompt as a system-role message (most reliable across models)
-    msgs = messages
-    if system:
-        msgs = [{"role": "system", "content": system}] + list(messages)
-
-    payload = {
-        "model": model,
-        "messages": msgs,
-        "stream": False,
-    }
-
-    data = json.dumps(payload).encode("utf-8")
+    model = _resolve_model(model or DEFAULT_MODEL, available)
+    msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+    payload = json.dumps({"model": model, "messages": msgs, "stream": False}).encode()
     req = urllib.request.Request(
         f"{OLLAMA_BASE}/api/chat",
-        data=data,
+        data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        result = json.loads(resp.read())
-        return result["message"]["content"]
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        return json.loads(resp.read())["message"]["content"]
 
 
 # ---------------------------------------------------------------------------
-# Cloud fallbacks
+# Async interface (FastAPI / Pigeon API)
 # ---------------------------------------------------------------------------
 
-def anthropic_chat(messages: List[Dict], system: str = None) -> str:
-    """Anthropic Claude fallback."""
+async def ollama_available_async() -> bool:
     try:
-        import anthropic
-        client = anthropic.Anthropic()
-        kwargs = {
-            "model": "claude-haiku-4-5",
-            "max_tokens": 2048,
-            "messages": messages,
-        }
-        if system:
-            kwargs["system"] = system
-        response = client.messages.create(**kwargs)
-        return response.content[0].text
-    except ImportError:
-        raise RuntimeError("anthropic package not installed: pip install anthropic")
+        import httpx
+        async with httpx.AsyncClient(timeout=2) as client:
+            resp = await client.get(f"{OLLAMA_BASE}/api/tags")
+            return resp.status_code == 200
+    except Exception:
+        return False
 
 
-# ---------------------------------------------------------------------------
-# Unified interface
-# ---------------------------------------------------------------------------
+async def ollama_models_async() -> List[str]:
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=2) as client:
+            resp = await client.get(f"{OLLAMA_BASE}/api/tags")
+            return [m["name"] for m in resp.json().get("models", [])]
+    except Exception:
+        return []
 
-def chat(
+
+async def ollama_chat_async(
+    messages: List[Dict],
+    model: str = None,
+    system: str = None,
+) -> str:
+    """Async Ollama chat — use this inside FastAPI endpoints."""
+    import httpx
+    available = await ollama_models_async()
+    model = _resolve_model(model or DEFAULT_MODEL, available)
+    msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+    payload = {"model": model, "messages": msgs, "stream": False}
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(f"{OLLAMA_BASE}/api/chat", json=payload)
+        resp.raise_for_status()
+        return resp.json()["message"]["content"]
+
+
+async def chat_async(
     messages: List[Dict],
     system: str = None,
     model: str = None,
-    prefer_local: bool = True,
 ) -> Dict:
     """
-    Send a chat, trying local Ollama first then cloud fallback.
-
-    Returns dict with:
-      - content: the response text
-      - backend: which backend was used ("ollama" | "anthropic" | "openai")
-      - model: which model responded
+    Async unified chat — Ollama first, Anthropic fallback.
+    Use this in FastAPI endpoints.
     """
-    if prefer_local and ollama_available():
+    if await ollama_available_async():
         try:
-            available = ollama_models()
-            used_model = model or DEFAULT_MODEL
-            if used_model not in available and available:
-                used_model = available[0]
-            content = ollama_chat(messages, model=used_model, system=system)
+            available = await ollama_models_async()
+            used_model = _resolve_model(model or DEFAULT_MODEL, available)
+            content = await ollama_chat_async(messages, model=used_model, system=system)
             return {"content": content, "backend": "ollama", "model": used_model}
-        except Exception as e:
+        except Exception:
             pass  # fall through to cloud
 
     # Cloud fallback
     try:
-        content = anthropic_chat(messages, system=system)
-        return {"content": content, "backend": "anthropic", "model": "claude-haiku-4-5"}
+        import anthropic
+        client = anthropic.Anthropic()
+        kwargs = {"model": "claude-haiku-4-5", "max_tokens": 2048, "messages": messages}
+        if system:
+            kwargs["system"] = system
+        response = client.messages.create(**kwargs)
+        return {"content": response.content[0].text, "backend": "anthropic", "model": "claude-haiku-4-5"}
     except Exception as e:
-        raise RuntimeError(f"All backends failed. Last error: {e}")
+        raise RuntimeError(f"All backends failed: {e}")
+
+
+# Sync unified chat (scripts/CLI)
+def chat(messages: List[Dict], system: str = None, model: str = None, prefer_local: bool = True) -> Dict:
+    if prefer_local and ollama_available():
+        try:
+            available = ollama_models()
+            used_model = _resolve_model(model or DEFAULT_MODEL, available)
+            content = ollama_chat(messages, model=used_model, system=system)
+            return {"content": content, "backend": "ollama", "model": used_model}
+        except Exception:
+            pass
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        kwargs = {"model": "claude-haiku-4-5", "max_tokens": 2048, "messages": messages}
+        if system:
+            kwargs["system"] = system
+        response = client.messages.create(**kwargs)
+        return {"content": response.content[0].text, "backend": "anthropic", "model": "claude-haiku-4-5"}
+    except Exception as e:
+        raise RuntimeError(f"All backends failed: {e}")
 
 
 def status() -> Dict:
-    """Return LLM backend status."""
     available = ollama_models() if ollama_available() else []
     return {
         "ollama": {
@@ -169,15 +183,9 @@ if __name__ == "__main__":
     import pprint
     print("=== Shannon LLM Status ===")
     pprint.pprint(status())
-
-    if ollama_available():
-        models = ollama_models()
-        if models:
-            print(f"\n=== Test chat with {models[0]} ===")
-            resp = chat([{"role": "user", "content": "Say hello in one sentence."}])
-            print(f"Response: {resp['content']}")
-            print(f"Backend:  {resp['backend']} / {resp['model']}")
-        else:
-            print("\nOllama running but no models yet. Still pulling?")
-    else:
-        print("\nOllama not running.")
+    available = ollama_models()
+    if available:
+        print(f"\n=== Test chat with {available[0]} ===")
+        resp = chat([{"role": "user", "content": "Say hello in one sentence."}])
+        print(f"Response: {resp['content']}")
+        print(f"Backend:  {resp['backend']} / {resp['model']}")

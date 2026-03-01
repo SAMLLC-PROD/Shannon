@@ -112,37 +112,29 @@ class ShannonAgent:
         init_store()
 
     def chat(self, message: str, save_response: bool = False) -> Dict:
-        """
-        Send a message and get a response.
-
-        Args:
-            message: User's message
-            save_response: If True, save this exchange to Shannon LTM
-
-        Returns dict with content, backend, model, session_id
-        """
+        """Synchronous chat — for CLI/scripts."""
         self.history.append({"role": "user", "content": message})
-
         system = build_system_prompt(workspace=self.workspace)
-
-        result = chat(
-            messages=self.history,
-            system=system,
-        )
-
+        result = chat(messages=self.history, system=system)
         self.history.append({"role": "assistant", "content": result["content"]})
-
         if save_response:
             chunk = f"Q: {message}\nA: {result['content']}"
             save(chunk, session_id=self.session_id, tags=["agent", "exchange"])
             generate_context_file()
+        return {**result, "session_id": self.session_id}
 
-        return {
-            "content": result["content"],
-            "backend": result["backend"],
-            "model": result["model"],
-            "session_id": self.session_id,
-        }
+    async def chat_async(self, message: str, save_response: bool = False) -> Dict:
+        """Async chat — use this in FastAPI endpoints."""
+        from .llm import chat_async as _chat_async
+        self.history.append({"role": "user", "content": message})
+        system = build_system_prompt(workspace=self.workspace)
+        result = await _chat_async(messages=self.history, system=system)
+        self.history.append({"role": "assistant", "content": result["content"]})
+        if save_response:
+            chunk = f"Q: {message}\nA: {result['content']}"
+            save(chunk, session_id=self.session_id, tags=["agent", "exchange"])
+            generate_context_file()
+        return {**result, "session_id": self.session_id}
 
     def remember(self, text: str, tags: List[str] = None) -> str:
         """Explicitly save something to LTM."""
