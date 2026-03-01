@@ -18,7 +18,7 @@ from typing import Optional, List, Dict, Generator
 
 
 OLLAMA_BASE    = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-DEFAULT_MODEL  = os.environ.get("SHANNON_MODEL", "qwen2.5:32b")
+DEFAULT_MODEL  = os.environ.get("SHANNON_MODEL", "qwen2.5:7b")
 FAST_MODEL     = os.environ.get("SHANNON_FAST_MODEL", "mistral:7b")
 
 
