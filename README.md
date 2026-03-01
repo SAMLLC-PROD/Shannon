@@ -126,3 +126,41 @@ Shannon fixes that.
 ---
 
 *Ron Peterson & Guy Shannon — Centennial, CO — 2026*
+
+---
+
+## Quickstart
+
+```bash
+git clone https://github.com/SAMLLC-PROD/Shannon.git
+cd Shannon
+pip install -e .
+```
+
+Run the tests:
+```bash
+pip install pytest
+pytest
+```
+
+Try it:
+```python
+from shannon.store import write, read_data, stats
+from shannon.qam import data_to_pattern
+
+# Write something to the dictionary
+addr = write("Hello from Shannon", session_id="my-session", tags=["demo"])
+print(f"Address: {addr}")
+
+# Retrieve it
+print(read_data("Hello from Shannon"))
+
+# See its constellation
+pattern = data_to_pattern(b"Hello from Shannon")
+print(pattern["ascii"])
+
+# Dictionary stats
+print(stats())
+```
+
+**Requirements:** Python 3.11+, ~200MB disk space for zstandard. Works on Mac, Linux, Windows.
