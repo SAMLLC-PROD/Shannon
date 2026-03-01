@@ -238,6 +238,26 @@ def render_results_page(
     padding: 0;
   }}
 
+  /* Back button */
+  .back-btn {{
+    background: rgba(168,85,247,0.15);
+    border: 1px solid rgba(168,85,247,0.6);
+    color: var(--purple-bright);
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    letter-spacing: 3px;
+    padding: 6px 14px;
+    border-radius: 3px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: background 0.2s, box-shadow 0.2s;
+    flex-shrink: 0;
+  }}
+  .back-btn:hover {{
+    background: rgba(168,85,247,0.3);
+    box-shadow: 0 0 12px var(--purple-glow);
+  }}
+
   /* Header */
   .header {{
     border-bottom: 2px solid var(--border);
@@ -383,6 +403,7 @@ def render_results_page(
 </head>
 <body>
   <div class="header">
+    <button class="back-btn" onclick="window.history.back()">← BACK</button>
     <div class="header-logo">Shannon</div>
     <div class="header-query">"{query}"</div>
     <div class="header-meta">{backend} · {len(results)} results</div>
