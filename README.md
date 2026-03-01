@@ -164,3 +164,64 @@ print(stats())
 ```
 
 **Requirements:** Python 3.11+, ~200MB disk space for zstandard. Works on Mac, Linux, Windows.
+
+---
+
+## Shannon Agent — Local-First AI with Persistent Memory
+
+Shannon includes a full conversational agent that runs locally via Ollama:
+
+```bash
+# Install Ollama — https://ollama.com
+ollama pull qwen2.5:32b
+
+# Run the Shannon agent
+cd Shannon
+pip install -e .
+python -m shannon.agent
+```
+
+The agent:
+- Loads your SOUL.md, USER.md, and Shannon LTM context at startup
+- Sends to your local Ollama model (qwen2.5:32b by default)
+- Falls back to Anthropic Claude if no local model is available
+- Saves important exchanges back to Shannon automatically
+
+**Local-first means:** your conversations stay on your machine. Your memory stays on your drives. No cloud required after the initial pip install.
+
+### LLM Status
+
+```python
+from shannon.llm import status
+print(status())
+# {'ollama': {'running': True, 'models': ['qwen2.5:32b'], 'default_ready': True}, ...}
+```
+
+### Recommended Models (by hardware)
+
+| GPU VRAM | Recommended model | Command |
+|---|---|---|
+| 16GB+ | qwen2.5:32b | `ollama pull qwen2.5:32b` |
+| 8GB | llama3.2:8b | `ollama pull llama3.2:8b` |
+| No GPU / CPU | mistral:7b | `ollama pull mistral:7b` |
+
+### Per-User Agents (Pigeon integration)
+
+Shannon is designed so every user gets their own agent instance with their own:
+- `SOUL.md` — their agent's core values and personality
+- `USER.md` — context about them
+- Shannon LTM store — their memory, on their drives
+
+```python
+from shannon.agent import ShannonAgent
+from pathlib import Path
+
+agent = ShannonAgent(
+    session_id="2026-03-01",
+    workspace=Path("/path/to/user/workspace"),
+)
+response = agent.chat("What did we decide about the architecture last week?")
+print(response["content"])
+```
+
+---
