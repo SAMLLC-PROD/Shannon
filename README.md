@@ -15,7 +15,7 @@ This isn't a limitation we should accept. It's an engineering problem.
 
 When you talk to a person and they compress the details of your relationship into a summary — and then forget the summary — that's not memory. That's amnesia with extra steps.
 
-10 terabytes of local storage costs less than $200. There is no reason an AI should forget a conversation that happened yesterday.
+10 terabytes of local storage costs less than ($200, this was written by the agent, I know this is wrong, it's ok). There is no reason an AI should forget a conversation that happened yesterday.
 
 ---
 
