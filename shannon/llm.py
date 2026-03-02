@@ -129,10 +129,13 @@ async def chat_async(
         except Exception:
             pass  # fall through to cloud
 
-    # Cloud fallback
+    # Cloud fallback — always hit Anthropic directly, never via lattice-proxy
     try:
         import anthropic
-        client = anthropic.Anthropic()
+        client = anthropic.Anthropic(
+            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            base_url="https://api.anthropic.com",  # explicit — ignore ANTHROPIC_BASE_URL
+        )
         kwargs = {"model": "claude-haiku-4-5", "max_tokens": 2048, "messages": messages}
         if system:
             kwargs["system"] = system
@@ -154,7 +157,10 @@ def chat(messages: List[Dict], system: str = None, model: str = None, prefer_loc
             pass
     try:
         import anthropic
-        client = anthropic.Anthropic()
+        client = anthropic.Anthropic(
+            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            base_url="https://api.anthropic.com",  # explicit — ignore ANTHROPIC_BASE_URL
+        )
         kwargs = {"model": "claude-haiku-4-5", "max_tokens": 2048, "messages": messages}
         if system:
             kwargs["system"] = system
