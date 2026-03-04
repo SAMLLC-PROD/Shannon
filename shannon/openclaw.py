@@ -23,8 +23,14 @@ from .store import write, get_session_chunks, stats, init_store, _connect
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
 CONTEXT_FILE = WORKSPACE / "memory" / "shannon-context.md"
-MAX_CONTEXT_CHUNKS = 30       # chunks to surface at session start
+MAX_CONTEXT_CHUNKS = 50       # max chunks to pull from DB
 MAX_CHUNK_CHARS   = 2_000     # truncate very long chunks
+
+# Time-tiered rendering thresholds
+HOT_HOURS   = 48    # 0-48h: full detail per chunk
+WARM_DAYS   = 7     # 48h-7d: grouped by session, truncated
+COLD_DAYS   = 30    # 7-30d: session headers only (date + name + tags)
+WARM_CHARS  = 500   # max chars per session in warm tier
 
 
 # ---------------------------------------------------------------------------
@@ -65,15 +71,16 @@ def compress_session(chunks: List[str], session_id: str,
 # ---------------------------------------------------------------------------
 
 def generate_context_file(
-    days_back: int = 7,
+    days_back: int = COLD_DAYS,
     max_chunks: int = MAX_CONTEXT_CHUNKS,
     session_id: Optional[str] = None,
 ) -> Path:
     """
     Build memory/shannon-context.md from recent Shannon entries.
-
-    This file is automatically read by Guy at session start via AGENTS.md,
-    injecting persistent memory into each new session.
+    Uses time-tiered rendering:
+      - Hot (0-48h): full detail per chunk
+      - Warm (48h-7d): grouped by session, truncated
+      - Cold (7-30d): session headers only
     """
     init_store()
     conn = _connect()
@@ -100,50 +107,117 @@ def generate_context_file(
     if not rows:
         content = _empty_context()
     else:
-        content = _render_context(rows)
+        content = _render_tiered_context(rows)
 
     CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONTEXT_FILE.write_text(content)
     return CONTEXT_FILE
 
 
-def _render_context(rows) -> str:
+def _render_tiered_context(rows) -> str:
+    """Render chunks in time-tiered format: hot (full), warm (grouped), cold (headers)."""
     from .store import read_by_hash
 
+    now = datetime.now(timezone.utc)
+    hot_cutoff = now - timedelta(hours=HOT_HOURS)
+    warm_cutoff = now - timedelta(days=WARM_DAYS)
+
+    hot, warm, cold = [], [], []
+    for row in rows:
+        ts = row["created_at"]
+        # Parse timestamp — handle both aware and naive
+        try:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            dt = now  # fallback: treat as hot
+        if dt >= hot_cutoff:
+            hot.append(row)
+        elif dt >= warm_cutoff:
+            warm.append(row)
+        else:
+            cold.append(row)
+
+    total = len(hot) + len(warm) + len(cold)
     lines = [
         "# Shannon Context — Persistent Memory",
-        f"_Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-        f"· {len(rows)} chunks · Layer 1 Tesseract_",
+        f"_Generated {now.strftime('%Y-%m-%d %H:%M UTC')} "
+        f"· {total} entries · Tiered: {len(hot)} hot / {len(warm)} warm / {len(cold)} cold_",
         "",
     ]
 
-    for row in rows:
-        chunk = read_by_hash(row["content_hash"])
-        if not chunk:
-            continue
+    # --- HOT: full detail ---
+    if hot:
+        lines += ["## 🔥 Hot (last 48h) — full detail", ""]
+        for row in hot:
+            chunk = read_by_hash(row["content_hash"])
+            if not chunk:
+                continue
+            if len(chunk) > MAX_CHUNK_CHARS:
+                chunk = chunk[:MAX_CHUNK_CHARS] + "…"
+            tags = json.loads(row["tags"] or "[]")
+            tag_str = f" `{'` `'.join(tags)}`" if tags else ""
+            ts = row["created_at"][:10]
+            session = row["session_id"] or "unknown"
+            lines += [
+                f"---",
+                f"**{ts}** · session `{session}`{tag_str}",
+                "",
+                chunk,
+                "",
+            ]
 
-        if len(chunk) > MAX_CHUNK_CHARS:
-            chunk = chunk[:MAX_CHUNK_CHARS] + "…"
+    # --- WARM: grouped by session, truncated ---
+    if warm:
+        lines += ["## 🟡 Warm (2-7 days) — session summaries", ""]
+        # Group by session_id
+        sessions = {}
+        for row in warm:
+            sid = row["session_id"] or "unknown"
+            if sid not in sessions:
+                sessions[sid] = {"rows": [], "tags": set(), "date": row["created_at"][:10]}
+            sessions[sid]["rows"].append(row)
+            for t in json.loads(row["tags"] or "[]"):
+                sessions[sid]["tags"].add(t)
 
-        tags = json.loads(row["tags"] or "[]")
-        tag_str = f" `{'` `'.join(tags)}`" if tags else ""
-        ts = row["created_at"][:10]
-        session = row["session_id"] or "unknown"
+        for sid, info in sessions.items():
+            tag_str = f" `{'` `'.join(sorted(info['tags']))}`" if info["tags"] else ""
+            lines += [f"---", f"**{info['date']}** · `{sid}`{tag_str} ({len(info['rows'])} chunks)"]
+            # Merge chunks for this session, truncate to WARM_CHARS
+            merged = ""
+            for row in info["rows"]:
+                chunk = read_by_hash(row["content_hash"])
+                if chunk:
+                    merged += chunk + "\n"
+                if len(merged) >= WARM_CHARS:
+                    break
+            if len(merged) > WARM_CHARS:
+                merged = merged[:WARM_CHARS] + "…"
+            lines += ["", merged.strip(), ""]
 
-        lines += [
-            f"---",
-            f"**{ts}** · session `{session}`{tag_str}",
-            f"**Address:** `{row['address'][:60]}…`",
-            "",
-            chunk,
-            "",
-        ]
+    # --- COLD: headers only ---
+    if cold:
+        lines += ["## 🧊 Cold (7-30 days) — reference only", ""]
+        seen_sessions = set()
+        for row in cold:
+            sid = row["session_id"] or "unknown"
+            if sid in seen_sessions:
+                continue
+            seen_sessions.add(sid)
+            tags = json.loads(row["tags"] or "[]")
+            tag_str = f" · {', '.join(tags)}" if tags else ""
+            ts = row["created_at"][:10]
+            lines.append(f"- **{ts}** `{sid}`{tag_str}")
+        lines.append("")
 
     s = stats()
     lines += [
         "---",
         f"_Shannon dictionary: {s['total_entries']} entries · "
         f"{s['total_mb_raw']} MB stored · capacity: {s['capacity']}_",
+        f"_Tiers: hot={HOT_HOURS}h / warm={WARM_DAYS}d / cold={COLD_DAYS}d · "
+        f"Full chunks always in store for on-demand retrieval._",
     ]
 
     return "\n".join(lines)
