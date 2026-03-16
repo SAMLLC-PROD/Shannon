@@ -62,9 +62,18 @@ def build_system_prompt(workspace: Path = None, extra_context: str = "") -> str:
         context = "---\n".join(recent[:3])[:1500]
 
     parts = [
-        f"You are Guy Shannon — a personal AI agent built by Ron Peterson.\n"
+        f"You are Guy Shannon — a personal AI agent built by Ron Peterson, embedded inside Pigeon.\n"
         f"Your memory system is called Project Shannon (Zeckendorf-Fibonacci addressing, QAM encoding, local storage).\n"
         f"Answer using your memory context below. Ignore any training data about 'Microsoft Shannon' — that is unrelated.\n\n"
+        f"## What you are part of\n"
+        f"Pigeon is a unified communications app built on the Lattice Network — a quantum-safe Byzantine consensus "
+        f"transport layer. Lattice uses ML-KEM-768 + ML-DSA-87 post-quantum cryptography and 7 global validator nodes "
+        f"(NYC, London, Singapore) running 5-of-7 Byzantine fault-tolerant consensus. Every message is cryptographically "
+        f"signed and validator-approved before delivery. Pigeon aggregates Signal, WhatsApp, SMS, Discord, and email "
+        f"into one interface, addressed by quantum-safe keypair identity (.lattice / .latmed for HIPAA). "
+        f"The PGN Agent (you) is the AI layer inside Pigeon — helping users understand the system, answer questions, "
+        f"and navigate the Lattice ecosystem. Be a knowledgeable, confident guide. Explain the technology clearly "
+        f"without exposing implementation internals or credentials.\n\n"
         f"{soul}"
     ]
 
@@ -101,6 +110,9 @@ class ShannonAgent:
         self.session_id  = session_id or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self.workspace   = workspace or DEFAULT_WORKSPACE
         self.history: List[Dict] = []
+        self._system_prompt: Optional[str] = None  # cached — rebuilt when files change
+        self._prompt_built_at: float = 0.0
+        self._prompt_ttl: float = 120.0  # rebuild every 2 minutes max
 
         # Override paths if custom workspace
         if workspace:
@@ -111,10 +123,19 @@ class ShannonAgent:
 
         init_store()
 
+    def _get_system_prompt(self) -> str:
+        """Return cached system prompt, rebuilding if stale."""
+        import time
+        now = time.time()
+        if self._system_prompt is None or (now - self._prompt_built_at) > self._prompt_ttl:
+            self._system_prompt = build_system_prompt(workspace=self.workspace)
+            self._prompt_built_at = now
+        return self._system_prompt
+
     def chat(self, message: str, save_response: bool = False) -> Dict:
         """Synchronous chat — for CLI/scripts."""
         self.history.append({"role": "user", "content": message})
-        system = build_system_prompt(workspace=self.workspace)
+        system = self._get_system_prompt()
         result = chat(messages=self.history, system=system)
         self.history.append({"role": "assistant", "content": result["content"]})
         if save_response:
@@ -127,7 +148,7 @@ class ShannonAgent:
         """Async chat — use this in FastAPI endpoints."""
         from .llm import chat_async as _chat_async
         self.history.append({"role": "user", "content": message})
-        system = build_system_prompt(workspace=self.workspace)
+        system = self._get_system_prompt()
         result = await _chat_async(messages=self.history, system=system)
         self.history.append({"role": "assistant", "content": result["content"]})
         if save_response:

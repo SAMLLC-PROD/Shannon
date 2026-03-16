@@ -18,17 +18,27 @@ OLLAMA_BASE   = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.environ.get("SHANNON_MODEL", "qwen2.5:7b")
 FAST_MODEL    = os.environ.get("SHANNON_FAST_MODEL", "mistral:7b")
 
+# Ollama availability cache — avoid checking on every request
+import time as _time
+_ollama_cache: dict = {"available": None, "checked_at": 0, "ttl": 30}  # 30s TTL
+
 
 # ---------------------------------------------------------------------------
 # Sync helpers (CLI / scripts)
 # ---------------------------------------------------------------------------
 
 def ollama_available() -> bool:
+    now = _time.time()
+    if _ollama_cache["available"] is not None and (now - _ollama_cache["checked_at"]) < _ollama_cache["ttl"]:
+        return _ollama_cache["available"]
     try:
         req = urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=2)
-        return req.status == 200
+        result = req.status == 200
     except Exception:
-        return False
+        result = False
+    _ollama_cache["available"] = result
+    _ollama_cache["checked_at"] = now
+    return result
 
 
 def ollama_models() -> List[str]:
@@ -74,13 +84,19 @@ def ollama_chat(messages: List[Dict], model: str = None, system: str = None) -> 
 # ---------------------------------------------------------------------------
 
 async def ollama_available_async() -> bool:
+    now = _time.time()
+    if _ollama_cache["available"] is not None and (now - _ollama_cache["checked_at"]) < _ollama_cache["ttl"]:
+        return _ollama_cache["available"]
     try:
         import httpx
         async with httpx.AsyncClient(timeout=2) as client:
             resp = await client.get(f"{OLLAMA_BASE}/api/tags")
-            return resp.status_code == 200
+            result = resp.status_code == 200
     except Exception:
-        return False
+        result = False
+    _ollama_cache["available"] = result
+    _ollama_cache["checked_at"] = now
+    return result
 
 
 async def ollama_models_async() -> List[str]:
@@ -117,10 +133,12 @@ async def chat_async(
     model: str = None,
 ) -> Dict:
     """
-    Async unified chat — Ollama first, Anthropic fallback.
+    Async unified chat — Ollama first (unless SHANNON_PREFER_CLOUD=true), Anthropic fallback.
     Use this in FastAPI endpoints.
     """
-    if await ollama_available_async():
+    prefer_cloud = os.environ.get("SHANNON_PREFER_CLOUD", "").lower() in ("1", "true", "yes")
+
+    if not prefer_cloud and await ollama_available_async():
         try:
             available = await ollama_models_async()
             used_model = _resolve_model(model or DEFAULT_MODEL, available)
@@ -129,20 +147,66 @@ async def chat_async(
         except Exception:
             pass  # fall through to cloud
 
-    # Cloud fallback — always hit Anthropic directly, never via lattice-proxy
+    # Cloud — AsyncAnthropic to avoid blocking the event loop
     try:
         import anthropic
-        client = anthropic.Anthropic(
+        client = anthropic.AsyncAnthropic(
             api_key=os.environ.get("ANTHROPIC_API_KEY"),
             base_url="https://api.anthropic.com",  # explicit — ignore ANTHROPIC_BASE_URL
         )
-        kwargs = {"model": "claude-haiku-4-5", "max_tokens": 2048, "messages": messages}
+        kwargs = {"model": "claude-haiku-4-5", "max_tokens": 1024, "messages": messages}
         if system:
             kwargs["system"] = system
-        response = client.messages.create(**kwargs)
+        response = await client.messages.create(**kwargs)
         return {"content": response.content[0].text, "backend": "anthropic", "model": "claude-haiku-4-5"}
     except Exception as e:
         raise RuntimeError(f"All backends failed: {e}")
+
+
+async def chat_stream_async(
+    messages: List[Dict],
+    system: str = None,
+    model: str = None,
+):
+    """
+    Async streaming chat — yields text chunks as they arrive.
+    Ollama skipped if SHANNON_PREFER_CLOUD=true.
+    Use with FastAPI StreamingResponse for real-time UI updates.
+    """
+    prefer_cloud = os.environ.get("SHANNON_PREFER_CLOUD", "").lower() in ("1", "true", "yes")
+
+    if not prefer_cloud and await ollama_available_async():
+        try:
+            import httpx
+            available = await ollama_models_async()
+            used_model = _resolve_model(model or DEFAULT_MODEL, available)
+            msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+            payload = {"model": used_model, "messages": msgs, "stream": True}
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream("POST", f"{OLLAMA_BASE}/api/chat", json=payload) as resp:
+                    async for line in resp.aiter_lines():
+                        if line:
+                            chunk = json.loads(line)
+                            delta = chunk.get("message", {}).get("content", "")
+                            if delta:
+                                yield delta
+                            if chunk.get("done"):
+                                return
+        except Exception:
+            pass  # fall through to cloud
+
+    # Cloud streaming — AsyncAnthropic
+    import anthropic
+    client = anthropic.AsyncAnthropic(
+        api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        base_url="https://api.anthropic.com",
+    )
+    kwargs = {"model": "claude-haiku-4-5", "max_tokens": 1024, "messages": messages}
+    if system:
+        kwargs["system"] = system
+    async with client.messages.stream(**kwargs) as stream:
+        async for text in stream.text_stream:
+            yield text
 
 
 # Sync unified chat (scripts/CLI)
