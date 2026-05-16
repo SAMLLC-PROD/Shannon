@@ -1,0 +1,15 @@
+[Unit]
+Description=Shannon Memory Service (M24)
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ron/development/shannon
+ExecStart=/home/ron/development/shannon/.venv/bin/python -m shannon.server
+Restart=on-failure
+RestartSec=5
+Environment=SHANNON_API_PORT=8765
+
+[Install]
+WantedBy=multi-user.target

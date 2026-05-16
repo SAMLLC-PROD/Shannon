@@ -1,59 +1,60 @@
-"""Shannon HTTP API — FastAPI wrapper for the Shannon SQLite store."""
+"""Shannon HTTP API — FastAPI wrapper for the Shannon memory service."""
 
 import hashlib
 import json
+import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel
 
 from .store import _connect, write, read_by_hash, stats, init_store
+from .embeddings import (
+    embed_and_store, semantic_search, backfill_all,
+    embedding_stats, init_embeddings, compute_embedding,
+)
+from .retrieval import retrieve
 
-app = FastAPI(title="Shannon Memory API", version="1.0")
+log = logging.getLogger(__name__)
 
-AGENT_PROFILES = {
-    "guy": ["milestone", "architecture", "decision", "lesson", "ron", "spec"],
-    "henry": ["network", "validator", "task", "playbook", "deploy", "ops"],
-    "nightwatch": ["topology", "anomaly", "threshold", "incident", "alert"],
-    "archie": ["test", "proof", "requirement", "tech-gap", "m22"],
-}
-
-VALID_AGENTS = set(AGENT_PROFILES.keys())
-
-# (min_hours_ago, max_hours_ago) — None means unbounded
-RECENCY_WINDOWS = {
-    "hot":  (0,        48),
-    "warm": (48,       7 * 24),
-    "cold": (7 * 24,   30 * 24),
-    "all":  None,
-}
+app = FastAPI(title="Shannon Memory Service", version="2.0")
 
 
-def _tokens(text: str) -> int:
-    return max(1, len(text) // 4)
+# ---------------------------------------------------------------------------
+# Agent management
+# ---------------------------------------------------------------------------
+
+def _init_agents_table():
+    conn = _connect()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            agent_id TEXT PRIMARY KEY,
+            display_name TEXT,
+            tag_profile TEXT DEFAULT '[]',
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
 
 
-def _parse_dt(ts: str, fallback: datetime) -> datetime:
-    try:
-        dt = datetime.fromisoformat(ts)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return fallback
-
-
-def _row_to_entry(row, body: str, now: datetime) -> dict:
-    dt = _parse_dt(row["created_at"], now)
-    age_hours = (now - dt).total_seconds() / 3600
-    return {
-        "id": row["content_hash"],
-        "session_id": row["session_id"],
-        "tags": json.loads(row["tags"] or "[]"),
-        "body": body,
-        "created_at": row["created_at"],
-        "age_hours": round(age_hours, 2),
-    }
+def _ensure_agent(agent_id: str) -> None:
+    """Auto-register agent if not exists."""
+    _init_agents_table()
+    conn = _connect()
+    exists = conn.execute(
+        "SELECT 1 FROM agents WHERE agent_id = ?", (agent_id,)
+    ).fetchone()
+    if not exists:
+        conn.execute(
+            "INSERT INTO agents (agent_id, display_name, tag_profile, created_at) VALUES (?, ?, ?, ?)",
+            (agent_id, agent_id, "[]", datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        log.info("Auto-registered agent: %s", agent_id)
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -63,86 +64,49 @@ def _row_to_entry(row, body: str, now: datetime) -> dict:
 @app.get("/health")
 def health():
     s = stats()
-    return {"status": "ok", "entries": s["total_entries"], "version": "1.0"}
-
-
-# ---------------------------------------------------------------------------
-# GET /memory
-# ---------------------------------------------------------------------------
-
-@app.get("/memory")
-def get_memory(
-    agent: str = Query(...),
-    topic: Optional[str] = Query(None),
-    limit_tokens: int = Query(2000),
-    recency: str = Query("hot"),
-):
-    if agent not in VALID_AGENTS:
-        raise HTTPException(400, f"Unknown agent '{agent}'. Valid: {sorted(VALID_AGENTS)}")
-    if recency not in RECENCY_WINDOWS:
-        raise HTTPException(400, f"Unknown recency '{recency}'. Valid: {list(RECENCY_WINDOWS)}")
-
-    init_store()
-    now = datetime.now(timezone.utc)
-
-    conn = _connect()
-    window = RECENCY_WINDOWS[recency]
-    if window is None:
-        rows = conn.execute(
-            "SELECT content_hash, created_at, session_id, tags FROM entries "
-            "ORDER BY created_at DESC LIMIT 1000"
-        ).fetchall()
-    else:
-        min_h, max_h = window
-        older_than = (now - timedelta(hours=min_h)).isoformat() if min_h > 0 else None
-        newer_than = (now - timedelta(hours=max_h)).isoformat()
-        if older_than:
-            rows = conn.execute(
-                "SELECT content_hash, created_at, session_id, tags FROM entries "
-                "WHERE created_at < ? AND created_at >= ? "
-                "ORDER BY created_at DESC LIMIT 1000",
-                (older_than, newer_than),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT content_hash, created_at, session_id, tags FROM entries "
-                "WHERE created_at >= ? "
-                "ORDER BY created_at DESC LIMIT 1000",
-                (newer_than,),
-            ).fetchall()
-    conn.close()
-
-    # Filter: tags must intersect agent profile OR include the agent name itself
-    profile_tags = set(AGENT_PROFILES[agent]) | {agent}
-    filtered = [r for r in rows if set(json.loads(r["tags"] or "[]")) & profile_tags]
-
-    # Optional topic filter
-    if topic:
-        filtered = [r for r in filtered if topic in json.loads(r["tags"] or "[]")]
-
-    # rows are newest-first; truncate oldest first to honour token budget
-    total_tokens = 0
-    kept = []
-    truncated = False
-    for row in filtered:
-        body = read_by_hash(row["content_hash"]) or ""
-        t = _tokens(body)
-        if total_tokens + t > limit_tokens:
-            truncated = True
-            break
-        kept.append((row, body))
-        total_tokens += t
-
+    try:
+        e = embedding_stats()
+    except Exception:
+        e = {"embedded": 0, "coverage": 0}
     return {
-        "agent": agent,
-        "entries": [_row_to_entry(r, b, now) for r, b in kept],
-        "total_tokens": total_tokens,
-        "truncated": truncated,
+        "status": "ok",
+        "version": "2.0",
+        "entries": s["total_entries"],
+        "embeddings": e["embedded"],
+        "embedding_coverage": e["coverage"],
     }
 
 
 # ---------------------------------------------------------------------------
-# POST /memory
+# GET /memory — token-budgeted retrieval with semantic scoring
+# ---------------------------------------------------------------------------
+
+@app.get("/memory")
+def get_memory(
+    agent: str = Query(..., description="Agent ID"),
+    topic: Optional[str] = Query(None, description="Semantic search topic"),
+    limit_tokens: int = Query(4000, description="Max tokens to return"),
+    recency: str = Query("all", description="Time window: hot/warm/cold/all"),
+):
+    init_store()
+    _ensure_agent(agent)
+    
+    result = retrieve(
+        agent_id=agent,
+        topic=topic,
+        limit_tokens=limit_tokens,
+        recency=recency,
+    )
+    
+    return {
+        "agent": agent,
+        "topic": topic,
+        **result,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /memory — write + auto-embed
 # ---------------------------------------------------------------------------
 
 class MemoryPost(BaseModel):
@@ -153,61 +117,207 @@ class MemoryPost(BaseModel):
 
 
 @app.post("/memory")
-def post_memory(payload: MemoryPost):
-    if payload.agent not in VALID_AGENTS:
-        raise HTTPException(400, f"Unknown agent '{payload.agent}'. Valid: {sorted(VALID_AGENTS)}")
-
+def post_memory(payload: MemoryPost, background_tasks: BackgroundTasks):
+    init_store()
+    _ensure_agent(payload.agent)
+    
     tags = list(payload.tags)
     if payload.agent not in tags:
         tags.append(payload.agent)
 
     write(payload.body, session_id=payload.session_id, tags=tags)
     content_hash = hashlib.sha256(payload.body.encode("utf-8")).hexdigest()
+    
+    # Embed in background (non-blocking)
+    background_tasks.add_task(embed_and_store, content_hash, payload.body)
+    
     return {"id": content_hash, "ok": True}
 
 
 # ---------------------------------------------------------------------------
-# GET /memory/search
+# GET /memory/search — semantic search
 # ---------------------------------------------------------------------------
 
 @app.get("/memory/search")
 def search_memory(
-    q: str = Query(...),
-    agent: Optional[str] = Query(None),
-    limit: int = Query(10),
+    q: str = Query(..., description="Search query"),
+    agent: Optional[str] = Query(None, description="Filter to agent"),
+    limit: int = Query(10, description="Max results"),
 ):
-    if agent and agent not in VALID_AGENTS:
-        raise HTTPException(400, f"Unknown agent '{agent}'. Valid: {sorted(VALID_AGENTS)}")
-
     init_store()
+    now = datetime.now(timezone.utc)
+    
     conn = _connect()
-    # Pull recent entries; LIKE on tags gives a cheap pre-filter
     rows = conn.execute(
         "SELECT content_hash, created_at, session_id, tags FROM entries "
         "ORDER BY created_at DESC LIMIT 2000"
     ).fetchall()
     conn.close()
-
-    now = datetime.now(timezone.utc)
-    q_lower = q.lower()
-
+    
+    # Agent filter
     if agent:
-        profile_tags = set(AGENT_PROFILES[agent]) | {agent}
-        rows = [r for r in rows if set(json.loads(r["tags"] or "[]")) & profile_tags]
-
+        _ensure_agent(agent)
+        rows = [
+            r for r in rows
+            if agent in json.loads(r["tags"] or "[]")
+        ]
+    
+    # Try semantic search first
+    content_hashes = [r["content_hash"] for r in rows]
+    sem_results = semantic_search(q, content_hashes, top_k=limit)
+    
+    if sem_results:
+        # Build response from semantic results
+        results = []
+        hash_to_row = {r["content_hash"]: r for r in rows}
+        for ch, score in sem_results:
+            row = hash_to_row.get(ch)
+            if not row:
+                continue
+            body = read_by_hash(ch) or ""
+            results.append({
+                "id": ch,
+                "session_id": row["session_id"],
+                "tags": json.loads(row["tags"] or "[]"),
+                "body": body,
+                "created_at": row["created_at"],
+                "score": round(score, 4),
+            })
+        return {"results": results, "count": len(results), "method": "semantic"}
+    
+    # Fallback: keyword search
+    q_lower = q.lower()
     results = []
     for row in rows:
-        tags_list = json.loads(row["tags"] or "[]")
-        # Check tags first (cheap), then body (expensive)
-        tag_hit = any(q_lower in t.lower() for t in tags_list)
-        if tag_hit:
-            body = read_by_hash(row["content_hash"]) or ""
-            results.append(_row_to_entry(row, body, now))
-        else:
-            body = read_by_hash(row["content_hash"]) or ""
-            if q_lower in body.lower():
-                results.append(_row_to_entry(row, body, now))
+        body = read_by_hash(row["content_hash"]) or ""
+        if q_lower in body.lower() or any(q_lower in t.lower() for t in json.loads(row["tags"] or "[]")):
+            results.append({
+                "id": row["content_hash"],
+                "session_id": row["session_id"],
+                "tags": json.loads(row["tags"] or "[]"),
+                "body": body,
+                "created_at": row["created_at"],
+                "score": None,
+            })
         if len(results) >= limit:
             break
+    
+    return {"results": results, "count": len(results), "method": "keyword"}
 
-    return {"results": results, "count": len(results)}
+
+# ---------------------------------------------------------------------------
+# GET /agents — list registered agents
+# ---------------------------------------------------------------------------
+
+@app.get("/agents")
+def list_agents():
+    init_store()
+    _init_agents_table()
+    conn = _connect()
+    rows = conn.execute("SELECT * FROM agents ORDER BY agent_id").fetchall()
+    conn.close()
+    
+    # Count entries per agent
+    main_conn = _connect()
+    agents = []
+    for row in rows:
+        count = main_conn.execute(
+            "SELECT COUNT(*) as c FROM entries WHERE tags LIKE ?",
+            (f'%"{row["agent_id"]}"%',),
+        ).fetchone()["c"]
+        agents.append({
+            "agent_id": row["agent_id"],
+            "display_name": row["display_name"],
+            "tag_profile": json.loads(row["tag_profile"] or "[]"),
+            "created_at": row["created_at"],
+            "entry_count": count,
+        })
+    main_conn.close()
+    
+    return {"agents": agents}
+
+
+# ---------------------------------------------------------------------------
+# POST /agents — register agent
+# ---------------------------------------------------------------------------
+
+class AgentPost(BaseModel):
+    agent_id: str
+    display_name: Optional[str] = None
+    tag_profile: List[str] = []
+
+
+@app.post("/agents")
+def register_agent(payload: AgentPost):
+    init_store()
+    _init_agents_table()
+    conn = _connect()
+    conn.execute(
+        "INSERT OR REPLACE INTO agents (agent_id, display_name, tag_profile, created_at) VALUES (?, ?, ?, ?)",
+        (
+            payload.agent_id,
+            payload.display_name or payload.agent_id,
+            json.dumps(payload.tag_profile),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "agent_id": payload.agent_id}
+
+
+# ---------------------------------------------------------------------------
+# POST /context/regenerate — trigger context file regeneration
+# ---------------------------------------------------------------------------
+
+@app.post("/context/regenerate")
+def regenerate_context():
+    """Run the openclaw context regeneration."""
+    import time
+    start = time.monotonic()
+    
+    try:
+        from .openclaw import generate_context_file
+        path = generate_context_file()
+        elapsed = round(time.monotonic() - start, 2)
+        return {"ok": True, "path": str(path), "elapsed_seconds": elapsed}
+    except ImportError:
+        # generate_context_file might not exist — call the module
+        import subprocess
+        result = subprocess.run(
+            ["python", "-m", "shannon.openclaw"],
+            capture_output=True, text=True, timeout=60,
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+        )
+        elapsed = round(time.monotonic() - start, 2)
+        return {
+            "ok": result.returncode == 0,
+            "stdout": result.stdout[-500:] if result.stdout else "",
+            "stderr": result.stderr[-500:] if result.stderr else "",
+            "elapsed_seconds": elapsed,
+        }
+
+
+# ---------------------------------------------------------------------------
+# POST /embeddings/backfill — embed all un-embedded entries
+# ---------------------------------------------------------------------------
+
+@app.post("/embeddings/backfill")
+def run_backfill(background_tasks: BackgroundTasks):
+    """Start embedding backfill in background."""
+    background_tasks.add_task(_backfill_task)
+    return {"ok": True, "message": "Backfill started in background. Check /health for progress."}
+
+
+def _backfill_task():
+    result = backfill_all()
+    log.info("Backfill complete: %s", result)
+
+
+# ---------------------------------------------------------------------------
+# GET /embeddings/stats
+# ---------------------------------------------------------------------------
+
+@app.get("/embeddings/stats")
+def get_embedding_stats():
+    return embedding_stats()
