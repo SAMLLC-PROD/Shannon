@@ -116,12 +116,16 @@ def retrieve(
             ).fetchall()
     conn.close()
     
-    # Agent filter
+    # Agent filter — if agent has tagged entries, filter to those.
+    # If no entries match the agent tag, return ALL entries (agent sees everything).
     if agent_id:
-        rows = [
+        agent_rows = [
             r for r in rows
             if agent_id in json.loads(r["tags"] or "[]")
         ]
+        if agent_rows:
+            rows = agent_rows
+        # else: keep all rows — agent is an orchestrator or new agent
     
     # Score each entry
     scored = []

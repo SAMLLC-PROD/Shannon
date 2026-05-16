@@ -5,11 +5,14 @@ Wants=ollama.service
 
 [Service]
 Type=simple
+User=ron
+Group=ron
 WorkingDirectory=/home/ron/development/shannon
 ExecStart=/home/ron/development/shannon/.venv/bin/python -m shannon.server
 Restart=on-failure
 RestartSec=5
 Environment=SHANNON_API_PORT=8765
+Environment=HOME=/home/ron
 
 [Install]
 WantedBy=multi-user.target
