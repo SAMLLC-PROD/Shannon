@@ -48,3 +48,35 @@ def test_context_file_has_shannon_header():
     content = path.read_text()
     assert "Shannon Context" in content
     assert "Layer 1 Tesseract" in content
+
+
+def test_cli_regenerate_command(tmp_path, monkeypatch):
+    import subprocess
+    from shannon.openclaw import save
+
+    # Save some data to trigger context regeneration
+    save("Test data for CLI", SESSION)
+
+    # Mock the environment to use a temporary directory
+    monkeypatch.setenv('SHANNON_HOME', str(tmp_path))
+
+    # Run the CLI command
+    result = subprocess.run(
+        ["python3", "-m", "shannon.cli", "regenerate"],
+        capture_output=True,
+        text=True
+    )
+
+    assert result.returncode == 0
+    assert "Context regeneration complete" in result.stdout
+
+    # Check JSON output for expected keys and values
+    import json
+    try:
+        output = json.loads(result.stdout)
+        assert isinstance(output, dict)
+        assert output["status"] == "ok"
+        assert isinstance(output["entries_processed"], int)
+        assert Path(output["output_file"]).exists()
+    except json.JSONDecodeError:
+        pytest.fail("Output is not valid JSON")
