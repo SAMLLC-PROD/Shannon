@@ -1,0 +1,24 @@
+{
+  "stsb": {
+    "dataset": "STS-B",
+    "pairs_tested": 50,
+    "spearman_correlation": 0.894,
+    "pearson_correlation": 0.889,
+    "avg_cosine_similarity": 0.8211,
+    "avg_human_score": 0.4934,
+    "embedding_model": "nomic-embed-text"
+  },
+  "squad": {
+    "dataset": "SQuAD v2",
+    "contexts_ingested": 50,
+    "questions_tested": 141,
+    "precision_at_1": 0.5319,
+    "precision_at_5": 0.8085,
+    "mrr": 0.6358,
+    "avg_latency_ms": 89.5,
+    "p50_latency_ms": 37.2,
+    "p99_latency_ms": 3595.9,
+    "ingest_time_s": 2.2,
+    "embedding_model": "nomic-embed-text"
+  }
+}
