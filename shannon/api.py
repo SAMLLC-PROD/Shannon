@@ -168,6 +168,7 @@ def search_memory(
     
     if sem_results:
         # Build response from semantic results
+        # Knowledge articles get a boost over quiz/baseline entries
         results = []
         hash_to_row = {r["content_hash"]: r for r in rows}
         for ch, score in sem_results:
@@ -175,14 +176,33 @@ def search_memory(
             if not row:
                 continue
             body = read_by_hash(ch) or ""
+            tags = json.loads(row["tags"] or "[]")
+            # Boost knowledge articles, penalize quiz-format noise
+            adjusted_score = score
+            if "knowledge" in tags:
+                # Knowledge articles are curated explanations — strong boost
+                adjusted_score = min(1.0, score * 1.30)
+                # Additional boost if query terms appear in body (tag-level match)
+                q_words = set(q.lower().split())
+                body_lower = body[:500].lower()
+                tag_lower = ' '.join(tags).lower()
+                term_hits = sum(1 for w in q_words if w in body_lower or w in tag_lower)
+                if term_hits >= 2:
+                    adjusted_score = min(1.0, adjusted_score + 0.05 * term_hits)
+            elif "baseline" in tags:
+                # Quiz/benchmark entries — penalize to prevent noise
+                adjusted_score = score * 0.75
             results.append({
                 "id": ch,
                 "session_id": row["session_id"],
-                "tags": json.loads(row["tags"] or "[]"),
+                "tags": tags,
                 "body": body,
                 "created_at": row["created_at"],
-                "score": round(score, 4),
+                "score": round(adjusted_score, 4),
             })
+        # Re-sort after score adjustment
+        results.sort(key=lambda x: x["score"], reverse=True)
+        results = results[:limit]
         return {"results": results, "count": len(results), "method": "semantic"}
     
     # Fallback: keyword search

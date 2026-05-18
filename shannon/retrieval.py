@@ -19,12 +19,13 @@ from .embeddings import semantic_search, compute_embedding, get_embedding, _cosi
 log = logging.getLogger(__name__)
 
 # Default scoring weights
-RELEVANCE_WEIGHT = 0.6
-RECENCY_WEIGHT = 0.4
+# Knowledge base mode: relevance dominates, recency is tiebreaker
+RELEVANCE_WEIGHT = 0.85
+RECENCY_WEIGHT = 0.15
 
 # Recency decay: entries lose recency score over time
-# Half-life of 48 hours — a 2-day-old entry has 0.5 recency score
-RECENCY_HALF_LIFE_HOURS = 48.0
+# Extended to 7 days — knowledge articles shouldn't decay quickly
+RECENCY_HALF_LIFE_HOURS = 168.0
 
 
 def _tokens(text: str) -> int:

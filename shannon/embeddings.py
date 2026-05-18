@@ -18,8 +18,8 @@ from .store import _connect, init_store, read_by_hash, LAYER1_DIR
 
 log = logging.getLogger(__name__)
 
-EMBED_MODEL = "nomic-embed-text"
-EMBED_DIM = 768
+EMBED_MODEL = "mxbai-embed-large"
+EMBED_DIM = 1024
 OLLAMA_URL = "http://localhost:11434"
 
 EMBEDDINGS_DB = LAYER1_DIR / "embeddings.db"
