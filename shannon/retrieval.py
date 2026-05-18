@@ -1,15 +1,24 @@
 """
 shannon/retrieval.py — Token-budgeted retrieval with combined semantic + recency scoring.
 
-Instead of filling entries newest-first, scores each entry by:
-  score = (relevance_weight × cosine_sim) + (recency_weight × recency_decay)
+Two-stage "electoral college" retrieval:
+  Stage 1: Group entries by source, pick the best-scoring entry per source.
+  Stage 2: Rank sources by their best entry's score, fill token budget
+           by round-robin across top sources.
 
-Then fills token budget with highest-scoring entries.
+This prevents high-volume sources (e.g., a 200-chunk course) from
+dominating results over focused, high-density sources (e.g., a 10-chunk
+deep-dive series).
+
+Entry scoring:
+  score = (relevance_weight × cosine_sim) + (recency_weight × recency_decay)
 """
 
 import json
 import math
 import logging
+import re
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -47,6 +56,46 @@ def _recency_score(created_at: str, now: datetime) -> float:
     
     age_hours = max(0, (now - dt).total_seconds() / 3600)
     return math.exp(-0.693 * age_hours / RECENCY_HALF_LIFE_HOURS)
+
+
+# Regex to strip chunk index suffixes from session IDs.
+# Handles both patterns:
+#   "yt-dns-101-miniseries-f-42" -> "yt-dns-101-miniseries"
+#   "yt-computer-networking-fundamentals-course-164" -> "yt-computer-networking-fundamentals-course"
+# Strategy: strip trailing -N or -f-N where N is purely numeric.
+_CHUNK_SUFFIX_RE = re.compile(r"(-f)?-\d+$")
+
+
+def _extract_source(item: dict) -> str:
+    """Extract a source identifier from an entry for electoral college grouping.
+    
+    Sources are the unit of proportional representation. A YouTube video,
+    an arXiv paper, a session conversation — each is one "state" that gets
+    one vote regardless of how many chunks it has.
+    
+    Heuristics (in priority order):
+    1. YouTube chunks: strip chunk suffix from session_id
+    2. arXiv entries: use session_id directly (arxiv-<id>)
+    3. Session entries: use session_id (date-based grouping)
+    4. Fallback: use content_hash (each entry is its own source)
+    """
+    tags = item.get("tags", [])
+    session_id = item.get("session_id") or ""
+    
+    # YouTube transcripts: group by video (strip chunk number)
+    if "youtube" in tags and session_id.startswith("yt-"):
+        return _CHUNK_SUFFIX_RE.sub("", session_id)
+    
+    # arXiv papers: already one session per paper
+    if session_id.startswith("arxiv-"):
+        return session_id
+    
+    # Regular session entries: group by session
+    if session_id:
+        return session_id
+    
+    # No session — each entry is its own source
+    return item.get("content_hash", "unknown")
 
 
 def _parse_dt(ts: str) -> datetime:
@@ -167,31 +216,85 @@ def retrieve(
     # Sort by combined score (highest first)
     scored.sort(key=lambda x: x["score"], reverse=True)
     
-    # Fill token budget
+    # ---- Electoral College: two-stage source-aware retrieval ----
+    #
+    # Stage 1: Group entries by source. Each source gets ONE vote
+    #          (its best-scoring entry). This prevents a 200-chunk
+    #          course from drowning out a 10-chunk deep-dive.
+    #
+    # Stage 2: Rank sources by their best score. Fill token budget
+    #          by round-robin across top sources.
+    
+    source_groups = defaultdict(list)
+    for item in scored:
+        src = _extract_source(item)
+        source_groups[src].append(item)
+    
+    # Sort each source's entries by score (best first)
+    for src in source_groups:
+        source_groups[src].sort(key=lambda x: x["score"], reverse=True)
+    
+    # Rank sources by their best entry's score
+    ranked_sources = sorted(
+        source_groups.keys(),
+        key=lambda src: source_groups[src][0]["score"],
+        reverse=True,
+    )
+    
+    log.debug(
+        "Electoral college: %d entries -> %d sources. Top 5: %s",
+        len(scored),
+        len(ranked_sources),
+        [(s, round(source_groups[s][0]["score"], 3)) for s in ranked_sources[:5]],
+    )
+    
+    # Stage 2: Round-robin fill from top sources
+    # Each round, take the next-best chunk from each source (in rank order)
+    # until budget is exhausted or all chunks consumed.
     total_tokens = 0
     kept = []
     truncated = False
     
-    for item in scored:
-        body = read_by_hash(item["content_hash"])
-        if not body:
-            continue
-        t = _tokens(body)
-        if total_tokens + t > limit_tokens:
-            truncated = True
-            continue  # skip this one, try smaller entries
+    source_cursor = {src: 0 for src in ranked_sources}
+    max_rounds = max((len(v) for v in source_groups.values()), default=0)
+    
+    for round_num in range(max_rounds):
+        for src in ranked_sources:
+            items = source_groups[src]
+            idx = source_cursor[src]
+            if idx >= len(items):
+                continue  # this source is exhausted
+            
+            item = items[idx]
+            source_cursor[src] += 1
+            
+            body = read_by_hash(item["content_hash"])
+            if not body:
+                continue
+            t = _tokens(body)
+            if total_tokens + t > limit_tokens:
+                truncated = True
+                continue  # skip, try next source's chunk
+            
+            kept.append({
+                "id": item["content_hash"],
+                "session_id": item["session_id"],
+                "tags": item["tags"],
+                "body": body,
+                "created_at": item["created_at"],
+                "score": round(item["score"], 4),
+                "recency_score": round(item["recency_score"], 4),
+                "relevance_score": round(item["relevance_score"], 4) if item["relevance_score"] is not None else None,
+                "source": src,
+            })
+            total_tokens += t
         
-        kept.append({
-            "id": item["content_hash"],
-            "session_id": item["session_id"],
-            "tags": item["tags"],
-            "body": body,
-            "created_at": item["created_at"],
-            "score": round(item["score"], 4),
-            "recency_score": round(item["recency_score"], 4),
-            "relevance_score": round(item["relevance_score"], 4) if item["relevance_score"] is not None else None,
-        })
-        total_tokens += t
+        # Early exit if budget is nearly full
+        if truncated and total_tokens >= limit_tokens * 0.95:
+            break
+    
+    # Sort final results by score for presentation
+    kept.sort(key=lambda x: x["score"], reverse=True)
     
     return {
         "entries": kept,
@@ -199,4 +302,5 @@ def retrieve(
         "truncated": truncated,
         "scored_count": len(scored),
         "returned_count": len(kept),
+        "source_count": len(ranked_sources),
     }

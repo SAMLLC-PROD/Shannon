@@ -126,8 +126,14 @@ def read_by_hash(content_hash: str) -> Optional[str]:
         return None
     raw = chunk_path.read_bytes()
     if HAS_ZSTD:
-        return zstd.ZstdDecompressor().decompress(raw).decode("utf-8")
-    return raw.decode("utf-8")
+        # Try zstd decompression first; fall back to raw text if the
+        # file isn't actually compressed (e.g., YouTube transcript chunks
+        # stored as plain text with .zst extension).
+        try:
+            return zstd.ZstdDecompressor().decompress(raw).decode("utf-8")
+        except zstd.ZstdError:
+            return raw.decode("utf-8", errors="replace")
+    return raw.decode("utf-8", errors="replace")
 
 
 def read_by_address(addr_str: str) -> Optional[str]:
