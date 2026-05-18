@@ -240,49 +240,19 @@ async def _handle_memory_search(args: dict[str, Any]) -> str:
         return f"Error: 'limit' must be an integer (got {raw_limit!r})."
 
     _ensure_agent(agent)
-    store.init_store()
 
-    # Get content hashes to search within (optionally filtered by agent)
+    # semantic_search is expected to handle its own keyword fallback when
+    # Ollama is unreachable (mirrors the GET /memory/search HTTP endpoint).
     method = "semantic"
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]]
     try:
-        conn = store._connect()
-        rows = conn.execute(
-            "SELECT content_hash, created_at, session_id, tags FROM entries "
-            "ORDER BY created_at DESC LIMIT 2000"
-        ).fetchall()
-        conn.close()
-
-        # Agent filter
-        if agent and agent != DEFAULT_AGENT:
-            agent_rows = [
-                r for r in rows
-                if agent in json.loads(r["tags"] or "[]")
-            ]
-            if agent_rows:
-                rows = agent_rows
-
-        content_hashes = [r["content_hash"] for r in rows]
-        hash_to_row = {r["content_hash"]: r for r in rows}
-
-        # semantic_search returns list[tuple[str, float]]
-        sem_results = embeddings.semantic_search(query, content_hashes, top_k=limit)
-
-        if sem_results:
-            for ch, score in sem_results:
-                row = hash_to_row.get(ch)
-                body = store.read_by_hash(ch) or ""
-                results.append({
-                    "content_hash": ch,
-                    "body": body,
-                    "tags": json.loads(row["tags"] or "[]") if row else [],
-                    "created_at": row["created_at"] if row else "",
-                    "score": score,
-                })
-        else:
-            # Ollama unavailable — fall back to keyword
-            results = _keyword_search(query, limit, agent)
-            method = "keyword"
+        raw = embeddings.semantic_search(query, limit=limit)  # type: ignore[attr-defined]
+        results = list(raw) if raw else []
+    except AttributeError:
+        # Older shannon builds may not expose semantic_search — fall back fully.
+        logger.warning("embeddings.semantic_search missing; using keyword fallback")
+        results = _keyword_search(query, limit, agent)
+        method = "keyword"
     except Exception as exc:
         logger.warning("semantic_search failed (%s); using keyword fallback", exc)
         results = _keyword_search(query, limit, agent)
@@ -363,9 +333,7 @@ async def _handle_memory_save(args: dict[str, Any]) -> str:
 
     _ensure_agent(agent)
 
-    import hashlib as _hashlib
-    address = store.write(content, session_id=session_id, tags=tags)
-    content_hash = _hashlib.sha256(content.encode("utf-8")).hexdigest()
+    content_hash = store.write(content, session_id=session_id, tags=tags)
 
     embed_status = "embedded"
     try:
@@ -377,8 +345,7 @@ async def _handle_memory_save(args: dict[str, Any]) -> str:
 
     return (
         f"Memory saved successfully.\n"
-        f"- Hash: `{content_hash}`\n"
-        f"- Address: `{address}`\n"
+        f"- Address: `{content_hash}`\n"
         f"- Session: {session_id}\n"
         f"- Agent: {agent}\n"
         f"- Tags: {', '.join(tags) if tags else '(none)'}\n"

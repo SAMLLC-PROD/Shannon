@@ -139,7 +139,7 @@ class TestDispatcher:
 class TestMemorySave:
 
     def test_save_calls_write_and_embed(self):
-        with patch.object(mcp_server.store, "write", return_value="ADDR-ABC") as w, \
+        with patch.object(mcp_server.store, "write", return_value="HASH-ABC") as w, \
              patch.object(mcp_server.embeddings, "embed_and_store") as e, \
              patch.object(mcp_server, "_ensure_agent"):
             result = run_async(mcp_server._handle_memory_save({
@@ -149,7 +149,7 @@ class TestMemorySave:
                 "session_id": "2026-05-17-planning",
             }))
 
-        assert "ADDR-ABC" in result
+        assert "HASH-ABC" in result
         assert "ron" in result
         assert "decision" in result
         w.assert_called_once()
@@ -158,9 +158,7 @@ class TestMemorySave:
         assert "ron" in kwargs["tags"]
         assert "decision" in kwargs["tags"]
         assert kwargs["session_id"] == "2026-05-17-planning"
-        # embed_and_store receives the SHA-256 content hash, not the Zeckendorf address
-        e.assert_called_once()
-        assert e.call_args[0][1] == "we picked Postgres over DynamoDB"
+        e.assert_called_once_with("HASH-ABC", "we picked Postgres over DynamoDB")
 
     def test_save_without_session_generates_one(self):
         with patch.object(mcp_server.store, "write", return_value="H1"), \
@@ -208,26 +206,25 @@ class TestMemorySearch:
         assert result.lower().startswith("error")
 
     def test_search_returns_formatted_results(self):
-        # semantic_search returns list[tuple[str, float]]
-        fake_sem_results = [("AAA", 0.91), ("BBB", 0.74)]
-        fake_rows = [
-            {"content_hash": "AAA", "created_at": "2026-05-17 12:00",
-             "session_id": "s1", "tags": json.dumps(["decision", "infra"])},
-            {"content_hash": "BBB", "created_at": "2026-05-10 09:00",
-             "session_id": "s2", "tags": json.dumps(["counterpoint"])},
+        fake_results = [
+            {
+                "content_hash": "AAA",
+                "body": "Postgres beats DynamoDB for relational workloads.",
+                "tags": ["decision", "infra"],
+                "created_at": "2026-05-17 12:00",
+                "score": 0.91,
+            },
+            {
+                "content_hash": "BBB",
+                "body": "DynamoDB is fine for write-heavy KV.",
+                "tags": ["counterpoint"],
+                "created_at": "2026-05-10 09:00",
+                "score": 0.74,
+            },
         ]
-        fake_conn = type('FakeConn', (), {
-            'execute': lambda self, *a, **k: type('R', (), {'fetchall': lambda s: fake_rows})(),
-            'close': lambda self: None,
-        })()
-        with patch.object(mcp_server.store, "init_store"), \
-             patch.object(mcp_server.store, "_connect", return_value=fake_conn), \
-             patch.object(mcp_server.embeddings, "semantic_search", return_value=fake_sem_results), \
-             patch.object(mcp_server.store, "read_by_hash", side_effect=lambda h: {
-                 "AAA": "Postgres beats DynamoDB for relational workloads.",
-                 "BBB": "DynamoDB is fine for write-heavy KV.",
-             }.get(h, "")), \
-             patch.object(mcp_server, "_ensure_agent"):
+        with patch.object(
+            mcp_server.embeddings, "semantic_search", return_value=fake_results
+        ), patch.object(mcp_server, "_ensure_agent"):
             result = run_async(mcp_server._handle_memory_search({
                 "query": "database choice",
                 "limit": 5,
@@ -242,21 +239,15 @@ class TestMemorySearch:
     def test_search_clamps_limit(self):
         captured = {}
 
-        def fake(q, content_hashes, top_k=20):
+        def fake(q, **kwargs):
             captured["q"] = q
-            captured["top_k"] = top_k
+            captured["limit"] = kwargs.get("limit")
             return []
 
-        fake_conn = type('FakeConn', (), {
-            'execute': lambda self, *a, **k: type('R', (), {'fetchall': lambda s: []})(),
-            'close': lambda self: None,
-        })()
-        with patch.object(mcp_server.store, "init_store"), \
-             patch.object(mcp_server.store, "_connect", return_value=fake_conn), \
-             patch.object(mcp_server.embeddings, "semantic_search", side_effect=fake), \
+        with patch.object(mcp_server.embeddings, "semantic_search", side_effect=fake), \
              patch.object(mcp_server, "_ensure_agent"):
             run_async(mcp_server._handle_memory_search({"query": "x", "limit": 9999}))
-        assert captured["top_k"] == 50  # MAX_SEARCH_LIMIT
+        assert captured["limit"] == 50  # MAX_SEARCH_LIMIT
 
     def test_search_falls_back_to_keyword(self):
         with patch.object(
@@ -271,25 +262,17 @@ class TestMemorySearch:
         assert "method=keyword" in result
 
     def test_search_hydrates_body_via_read_by_hash(self):
-        # semantic_search returns tuples; we hydrate body via read_by_hash
-        fake_rows = [
-            {"content_hash": "ZZZ", "created_at": "2026-05-17",
-             "session_id": "s1", "tags": '[]'},
-        ]
-        fake_conn = type('FakeConn', (), {
-            'execute': lambda self, *a, **k: type('R', (), {'fetchall': lambda s: fake_rows})(),
-            'close': lambda self: None,
-        })()
-        with patch.object(mcp_server.store, "init_store"), \
-             patch.object(mcp_server.store, "_connect", return_value=fake_conn), \
-             patch.object(
-                 mcp_server.embeddings, "semantic_search",
-                 return_value=[("ZZZ", 0.5)],
-             ), patch.object(
-                 mcp_server.store, "read_by_hash", return_value="hydrated body"
-             ) as r, patch.object(mcp_server, "_ensure_agent"):
+        # semantic_search returned a row without a body — we should
+        # fetch it from store.read_by_hash.
+        with patch.object(
+            mcp_server.embeddings,
+            "semantic_search",
+            return_value=[{"content_hash": "ZZZ", "score": 0.5}],
+        ), patch.object(
+            mcp_server.store, "read_by_hash", return_value="hydrated body"
+        ) as r, patch.object(mcp_server, "_ensure_agent"):
             result = run_async(mcp_server._handle_memory_search({"query": "x"}))
-        r.assert_called_with("ZZZ")
+        r.assert_called_once_with("ZZZ")
         assert "hydrated body" in result
 
 
@@ -555,32 +538,19 @@ class TestEndToEnd:
             stored[h] = content
             return h
 
-        def fake_semantic_search(q, content_hashes, top_k=20):
+        def fake_semantic_search(q, **_):
             return [
-                (h, 1.0 if q.lower() in body.lower() else 0.2)
+                {
+                    "content_hash": h,
+                    "body": body,
+                    "tags": ["default"],
+                    "created_at": "2026-05-17",
+                    "score": 1.0 if q.lower() in body.lower() else 0.2,
+                }
                 for h, body in stored.items()
-                if h in content_hashes
             ]
-
-        def fake_read_by_hash(h):
-            return stored.get(h, "")
-
-        fake_rows_ref = stored  # closure reference
-        def make_fake_conn():
-            rows = [
-                {"content_hash": h, "created_at": "2026-05-17",
-                 "session_id": "mcp", "tags": json.dumps(["default"])}
-                for h in fake_rows_ref
-            ]
-            return type('FakeConn', (), {
-                'execute': lambda self, *a, **k: type('R', (), {'fetchall': lambda s: rows})(),
-                'close': lambda self: None,
-            })()
 
         with patch.object(mcp_server.store, "write", side_effect=fake_write), \
-             patch.object(mcp_server.store, "init_store"), \
-             patch.object(mcp_server.store, "_connect", side_effect=lambda: make_fake_conn()), \
-             patch.object(mcp_server.store, "read_by_hash", side_effect=fake_read_by_hash), \
              patch.object(mcp_server.embeddings, "embed_and_store"), \
              patch.object(mcp_server.embeddings, "semantic_search",
                           side_effect=fake_semantic_search), \
@@ -589,7 +559,7 @@ class TestEndToEnd:
             save_result = run_async(mcp_server.call_tool("memory_save", {
                 "content": "MCP server uses stdio for transport.",
             }))
-            assert "saved successfully" in save_result[0].text.lower()
+            assert "HASH-0" in save_result[0].text
 
             search_result = run_async(mcp_server.call_tool("memory_search", {
                 "query": "stdio",
