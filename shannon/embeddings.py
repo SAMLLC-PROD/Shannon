@@ -172,9 +172,11 @@ def embed_and_store(content_hash: str, text: str) -> Optional[list[float]]:
     if existing:
         return existing
 
-    # Truncate very long texts (nomic-embed-text context is 8192 tokens)
-    if len(text) > 16000:
-        text = text[:16000]
+    # mxbai-embed-large has a 512 token context window (~1500 chars).
+    # Truncate to fit — the opening of a chunk is usually the most
+    # informative part (title + source + first paragraph).
+    if len(text) > 1500:
+        text = text[:1500]
 
     vec = compute_embedding(text)
     if vec:
