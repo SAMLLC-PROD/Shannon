@@ -241,20 +241,54 @@ async def _handle_memory_search(args: dict[str, Any]) -> str:
 
     _ensure_agent(agent)
 
-    # semantic_search is expected to handle its own keyword fallback when
-    # Ollama is unreachable (mirrors the GET /memory/search HTTP endpoint).
+    # Mirror the HTTP API approach: fetch recent entries, filter by agent,
+    # extract content_hashes, then pass to semantic_search.
     method = "semantic"
     results: list[dict[str, Any]]
     try:
-        raw = embeddings.semantic_search(query, limit=limit)  # type: ignore[attr-defined]
-        results = list(raw) if raw else []
-    except AttributeError:
-        # Older shannon builds may not expose semantic_search — fall back fully.
-        logger.warning("embeddings.semantic_search missing; using keyword fallback")
-        results = _keyword_search(query, limit, agent)
-        method = "keyword"
+        db_path = _index_db_path()
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT content_hash, created_at, session_id, tags "
+            "FROM entries ORDER BY created_at DESC LIMIT 2000"
+        ).fetchall()
+        conn.close()
+
+        # Filter by agent tag
+        filtered = [
+            r for r in rows
+            if agent in json.loads(r["tags"] or "[]")
+        ]
+
+        content_hashes = [r["content_hash"] for r in filtered]
+        if not content_hashes:
+            return f"No memories found for agent {agent!r}."
+
+        hash_to_row = {r["content_hash"]: dict(r) for r in filtered}
+
+        sem_results = embeddings.semantic_search(query, content_hashes, top_k=limit)
+
+        if sem_results:
+            results = []
+            for ch, score in sem_results:
+                row = hash_to_row.get(ch, {})
+                body = _safe_read_by_hash(ch)
+                results.append({
+                    "content_hash": ch,
+                    "body": body,
+                    "score": score,
+                    "tags": json.loads(row.get("tags") or "[]"),
+                    "created_at": row.get("created_at", ""),
+                    "session_id": row.get("session_id", ""),
+                })
+        else:
+            # semantic_search returned empty (Ollama down?) — keyword fallback
+            logger.warning("semantic_search returned no results; keyword fallback")
+            results = _keyword_search(query, limit, agent)
+            method = "keyword"
     except Exception as exc:
-        logger.warning("semantic_search failed (%s); using keyword fallback", exc)
+        logger.warning("semantic search failed (%s); using keyword fallback", exc)
         results = _keyword_search(query, limit, agent)
         method = "keyword"
 
