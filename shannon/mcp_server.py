@@ -754,6 +754,18 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] = {
 server: Server = Server(SERVER_NAME)
 
 
+@server.list_resources()  # type: ignore[misc]
+async def list_resources():
+    """Return empty resources list — Shannon exposes tools, not resources."""
+    return []
+
+
+@server.list_prompts()  # type: ignore[misc]
+async def list_prompts():
+    """Return empty prompts list — Shannon exposes tools, not prompts."""
+    return []
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """Return the full set of memory tools the MCP client can call."""
