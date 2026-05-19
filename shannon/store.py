@@ -3,14 +3,19 @@ Shannon dictionary store — Layer 1 Tesseract.
 
 Append-only. Content-addressed. Collision-free by Zeckendorf theorem.
 Nothing is ever deleted. Old context is always retrievable.
+
+Supersession: entries can mark other entries as superseded via the
+`supersedes` column. Superseded entries are excluded from retrieval
+but remain in storage (append-only — never deleted).
 """
 
 import sqlite3
 import json
 import hashlib
+import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 
 try:
     import zstandard as zstd
@@ -46,7 +51,8 @@ def init_store() -> None:
             created_at    TEXT NOT NULL,
             session_id    TEXT,
             tags          TEXT DEFAULT '[]',
-            byte_size     INTEGER DEFAULT 0
+            byte_size     INTEGER DEFAULT 0,
+            supersedes    TEXT DEFAULT '[]'
         );
 
         CREATE INDEX IF NOT EXISTS idx_session  ON entries(session_id);
@@ -108,11 +114,144 @@ def write(data: str, session_id: str = None, tags: List[str] = None) -> str:
     conn.commit()
     conn.close()
 
+    # --- Supersession detection ---
+    # If the content contains retraction patterns, search for contradicted
+    # memories and attach supersedes pointers.
+    superseded = _detect_supersession(data, tags or [])
+    if superseded:
+        conn = _connect()
+        conn.execute(
+            "UPDATE entries SET supersedes = ? WHERE content_hash = ?",
+            (json.dumps(superseded), content_hash),
+        )
+        conn.commit()
+        conn.close()
+
     # --- Log address to session index ---
     if session_id:
         _log_session(session_id, content_hash, addr_str)
 
     return addr_str
+
+
+# ---------------------------------------------------------------------------
+# Supersession detection
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate the author is retracting or replacing prior context.
+_RETRACTION_PATTERNS = [
+    re.compile(r"\b(no longer|not anymore|stopped? using|switched (?:from|away)|changed (?:from|my mind))", re.I),
+    re.compile(r"\b(replaced|deprecated|superseded|obsolete|retired|decommissioned)", re.I),
+    re.compile(r"\b(used to|previously|formerly|was using|were using)", re.I),
+    re.compile(r"\b(moved (?:from|to)|migrated (?:from|to)|transitioned (?:from|to))", re.I),
+    re.compile(r"\b(reverted|rolled back|undid|cancelled|abandoned)", re.I),
+]
+
+
+def _detect_supersession(content: str, tags: List[str]) -> List[str]:
+    """Detect if new content supersedes existing entries.
+    
+    If the content contains retraction-pattern language, search for
+    entries with overlapping tags that might be contradicted.
+    Returns a list of content_hashes that this entry supersedes.
+    
+    Conservative: only marks supersession when there's both a retraction
+    pattern AND a tag-overlapping prior entry. False negatives are safe;
+    false positives lose retrieval signal.
+    """
+    # Only trigger for entries with meaningful tags (skip generic)
+    meaningful_tags = [t for t in tags if t not in ("guy", "heartbeat", "default", "test")]
+    if not meaningful_tags:
+        return []
+    
+    # Check if content contains retraction language
+    has_retraction = any(p.search(content) for p in _RETRACTION_PATTERNS)
+    if not has_retraction:
+        return []
+    
+    # Search for prior entries with overlapping tags
+    # that might be contradicted by this new entry
+    try:
+        from .embeddings import compute_embedding, get_embedding, _cosine_similarity
+        query_vec = compute_embedding(content)
+    except Exception:
+        query_vec = None
+    
+    conn = _connect()
+    # Find entries with at least one overlapping meaningful tag
+    candidates = []
+    for tag in meaningful_tags[:5]:  # limit tag search breadth
+        rows = conn.execute(
+            "SELECT content_hash, tags, created_at FROM entries "
+            "WHERE tags LIKE ? ORDER BY created_at DESC LIMIT 20",
+            (f'%"{tag}"%',),
+        ).fetchall()
+        for row in rows:
+            candidates.append(row)
+    conn.close()
+    
+    # Deduplicate candidates
+    seen = set()
+    unique_candidates = []
+    for c in candidates:
+        ch = c["content_hash"]
+        if ch not in seen:
+            seen.add(ch)
+            unique_candidates.append(c)
+    
+    # Score candidates by semantic similarity to the new content
+    superseded = []
+    for candidate in unique_candidates:
+        ch = candidate["content_hash"]
+        
+        if query_vec:
+            entry_vec = get_embedding(ch)
+            if entry_vec:
+                sim = _cosine_similarity(query_vec, entry_vec)
+                # High similarity + retraction language = likely supersession
+                if sim > 0.65:
+                    superseded.append(ch)
+                    if len(superseded) >= 5:  # cap to avoid runaway
+                        break
+    
+    if superseded:
+        import logging
+        logging.getLogger(__name__).info(
+            "Supersession detected: new entry supersedes %d prior entries",
+            len(superseded),
+        )
+    
+    return superseded
+
+
+def get_superseded_hashes() -> Set[str]:
+    """Return the set of all content_hashes that have been superseded.
+    
+    Used by retrieval to filter out stale entries.
+    """
+    init_store()
+    conn = _connect()
+    
+    # Migrate: add supersedes column if missing (for existing DBs)
+    try:
+        conn.execute("SELECT supersedes FROM entries LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE entries ADD COLUMN supersedes TEXT DEFAULT '[]'")
+        conn.commit()
+    
+    rows = conn.execute(
+        "SELECT supersedes FROM entries WHERE supersedes != '[]' AND supersedes IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    
+    result: Set[str] = set()
+    for row in rows:
+        try:
+            hashes = json.loads(row["supersedes"])
+            result.update(hashes)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return result
 
 
 # ---------------------------------------------------------------------------

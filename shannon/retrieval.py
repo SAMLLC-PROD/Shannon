@@ -22,7 +22,7 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from .store import _connect, init_store, read_by_hash
+from .store import _connect, init_store, read_by_hash, get_superseded_hashes
 from .embeddings import semantic_search, compute_embedding, get_embedding, _cosine_similarity
 
 log = logging.getLogger(__name__)
@@ -165,6 +165,18 @@ def retrieve(
                 (newer_than,),
             ).fetchall()
     conn.close()
+    
+    # Supersession filter — remove entries that have been explicitly
+    # superseded by newer entries (retraction/replacement detected at write time).
+    superseded = get_superseded_hashes()
+    if superseded:
+        pre_count = len(rows)
+        rows = [r for r in rows if r["content_hash"] not in superseded]
+        if len(rows) < pre_count:
+            log.debug(
+                "Supersession: filtered %d superseded entries",
+                pre_count - len(rows),
+            )
     
     # Agent filter — if agent has tagged entries, filter to those.
     # If no entries match the agent tag, return ALL entries (agent sees everything).

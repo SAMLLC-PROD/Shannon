@@ -47,4 +47,4 @@ def test_context_file_has_shannon_header():
     path = generate_context_file(days_back=1)
     content = path.read_text()
     assert "Shannon Context" in content
-    assert "Layer 1 Tesseract" in content
+    assert "Persistent Memory" in content
