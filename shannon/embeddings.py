@@ -5,10 +5,13 @@ Uses Ollama's nomic-embed-text model (768 dimensions) for local embeddings.
 Falls back to keyword search if Ollama is unavailable.
 """
 
+import hashlib
 import json
 import logging
 import sqlite3
 import struct
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -65,12 +68,61 @@ def _unpack_embedding(blob: bytes, dim: int = EMBED_DIM) -> list[float]:
     return list(struct.unpack(f"!{dim}f", blob))
 
 
+# ---------------------------------------------------------------------------
+# Query embedding cache — avoids 2-second Ollama round-trip for repeated queries
+# ---------------------------------------------------------------------------
+
+_CACHE_MAX = 256  # max cached query embeddings
+_embed_cache: OrderedDict[str, list[float]] = OrderedDict()
+_cache_lock = threading.Lock()
+
+
+def _cache_key(text: str) -> str:
+    """Deterministic cache key for a query string."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_get(text: str) -> Optional[list[float]]:
+    """Check the in-memory embedding cache."""
+    key = _cache_key(text)
+    with _cache_lock:
+        if key in _embed_cache:
+            _embed_cache.move_to_end(key)  # refresh LRU position
+            return _embed_cache[key]
+    return None
+
+
+def _cache_put(text: str, vec: list[float]) -> None:
+    """Store an embedding in the in-memory cache."""
+    key = _cache_key(text)
+    with _cache_lock:
+        _embed_cache[key] = vec
+        _embed_cache.move_to_end(key)
+        while len(_embed_cache) > _CACHE_MAX:
+            _embed_cache.popitem(last=False)  # evict oldest
+
+
 def compute_embedding(text: str) -> Optional[list[float]]:
-    """Compute embedding via Ollama. Returns None if Ollama unavailable."""
+    """Compute embedding via Ollama with LRU cache.
+    
+    Returns cached result if available (instant). Otherwise calls Ollama
+    (~2s round-trip) and caches the result for future calls.
+    """
+    # Check cache first
+    cached = _cache_get(text)
+    if cached is not None:
+        return cached
+    
     try:
         resp = httpx.post(
             f"{OLLAMA_URL}/api/embed",
-            json={"model": EMBED_MODEL, "input": text},
+            json={
+                "model": EMBED_MODEL,
+                "input": text,
+                # Embed model is small (0.6GB) — CPU is fast enough
+                # and avoids CUDA contention with inference models.
+                "options": {"num_gpu": 0},
+            },
             timeout=30.0,
         )
         resp.raise_for_status()
@@ -78,7 +130,9 @@ def compute_embedding(text: str) -> Optional[list[float]]:
         # Ollama returns {"embeddings": [[...]]}
         embeddings = data.get("embeddings", [])
         if embeddings and len(embeddings) > 0:
-            return embeddings[0]
+            vec = embeddings[0]
+            _cache_put(text, vec)
+            return vec
         return None
     except Exception as e:
         log.warning("Embedding computation failed: %s", e)
