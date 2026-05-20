@@ -129,7 +129,7 @@ def post_memory(payload: MemoryPost, background_tasks: BackgroundTasks):
     # Auto-tier: infer from tags if caller left default
     if payload.tier == 2:
         tag_set = set(t.lower() for t in tags)
-        if tag_set & {'skill', 'decision', 'architecture', 'milestone', 'skill-compilation'}:
+        if tag_set & {'skill', 'skill-building', 'decision', 'architecture', 'milestone', 'skill-compilation', 'course-to-skill', 'claude-drop', 'project-setup', 'lesson-learned'}:
             tier = 1
         elif tag_set & {'youtube', 'transcript', 'raw-note'}:
             tier = 3
@@ -349,7 +349,7 @@ def backfill_tiers():
     counts = {1: 0, 2: 0, 3: 0}
     for row in rows:
         tags = set(t.lower() for t in json.loads(row["tags"] or "[]"))
-        if tags & {'skill', 'decision', 'architecture', 'milestone', 'skill-compilation'}:
+        if tags & {'skill', 'skill-building', 'decision', 'architecture', 'milestone', 'skill-compilation', 'course-to-skill', 'claude-drop', 'project-setup', 'lesson-learned'}:
             tier = 1
         elif tags & {'youtube', 'transcript', 'raw-note'}:
             tier = 3
