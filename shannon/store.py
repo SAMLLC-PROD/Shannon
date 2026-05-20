@@ -61,6 +61,12 @@ def init_store() -> None:
             USING fts5(content_hash, address, tags, content='entries');
     """)
     conn.commit()
+    # Add tier column — ALTER TABLE doesn't support IF NOT EXISTS in SQLite
+    try:
+        conn.execute("ALTER TABLE entries ADD COLUMN tier INTEGER DEFAULT 2")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
     conn.close()
 
 
@@ -74,7 +80,7 @@ def _connect() -> sqlite3.Connection:
 # Write
 # ---------------------------------------------------------------------------
 
-def write(data: str, session_id: str = None, tags: List[str] = None) -> str:
+def write(data: str, session_id: str = None, tags: List[str] = None, tier: int = 2) -> str:
     """
     Write a context chunk to the Shannon dictionary.
 
@@ -100,8 +106,8 @@ def write(data: str, session_id: str = None, tags: List[str] = None) -> str:
     conn = _connect()
     conn.execute(
         """INSERT OR IGNORE INTO entries
-           (content_hash, address, created_at, session_id, tags, byte_size)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (content_hash, address, created_at, session_id, tags, byte_size, tier)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             content_hash,
             addr_str,
@@ -109,6 +115,7 @@ def write(data: str, session_id: str = None, tags: List[str] = None) -> str:
             session_id,
             json.dumps(tags or []),
             len(raw),
+            tier,
         ),
     )
     conn.commit()

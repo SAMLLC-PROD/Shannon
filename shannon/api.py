@@ -114,6 +114,7 @@ class MemoryPost(BaseModel):
     agent: str
     tags: List[str] = []
     session_id: Optional[str] = None
+    tier: int = 2
 
 
 @app.post("/memory")
@@ -125,7 +126,19 @@ def post_memory(payload: MemoryPost, background_tasks: BackgroundTasks):
     if payload.agent not in tags:
         tags.append(payload.agent)
 
-    write(payload.body, session_id=payload.session_id, tags=tags)
+    # Auto-tier: infer from tags if caller left default
+    if payload.tier == 2:
+        tag_set = set(t.lower() for t in tags)
+        if tag_set & {'skill', 'decision', 'architecture', 'milestone', 'skill-compilation'}:
+            tier = 1
+        elif tag_set & {'youtube', 'transcript', 'raw-note'}:
+            tier = 3
+        else:
+            tier = 2
+    else:
+        tier = payload.tier
+
+    write(payload.body, session_id=payload.session_id, tags=tags, tier=tier)
     content_hash = hashlib.sha256(payload.body.encode("utf-8")).hexdigest()
     
     # Embed in background (non-blocking)
@@ -149,7 +162,7 @@ def search_memory(
     
     conn = _connect()
     rows = conn.execute(
-        "SELECT content_hash, created_at, session_id, tags FROM entries "
+        "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
         "ORDER BY created_at DESC LIMIT 2000"
     ).fetchall()
     conn.close()
@@ -177,21 +190,11 @@ def search_memory(
                 continue
             body = read_by_hash(ch) or ""
             tags = json.loads(row["tags"] or "[]")
-            # Boost knowledge articles, penalize quiz-format noise
-            adjusted_score = score
-            if "knowledge" in tags:
-                # Knowledge articles are curated explanations — strong boost
-                adjusted_score = min(1.0, score * 1.30)
-                # Additional boost if query terms appear in body (tag-level match)
-                q_words = set(q.lower().split())
-                body_lower = body[:500].lower()
-                tag_lower = ' '.join(tags).lower()
-                term_hits = sum(1 for w in q_words if w in body_lower or w in tag_lower)
-                if term_hits >= 2:
-                    adjusted_score = min(1.0, adjusted_score + 0.05 * term_hits)
-            elif "baseline" in tags:
-                # Quiz/benchmark entries — penalize to prevent noise
-                adjusted_score = score * 0.75
+            # Tier-weighted scoring: tier 1 (skill/decision) boosts, tier 3 (raw) penalizes
+            TIER_WEIGHTS = {1: 1.5, 2: 1.0, 3: 0.5}
+            tier = row["tier"] if row["tier"] is not None else 2
+            tier_weight = TIER_WEIGHTS.get(tier, 1.0)
+            adjusted_score = min(1.0, score * tier_weight)
             results.append({
                 "id": ch,
                 "session_id": row["session_id"],
@@ -332,6 +335,31 @@ def run_backfill(background_tasks: BackgroundTasks):
 def _backfill_task():
     result = backfill_all()
     log.info("Backfill complete: %s", result)
+
+
+# ---------------------------------------------------------------------------
+# POST /memory/backfill-tiers — assign tier to all existing entries
+# ---------------------------------------------------------------------------
+
+@app.post("/memory/backfill-tiers")
+def backfill_tiers():
+    init_store()
+    conn = _connect()
+    rows = conn.execute("SELECT content_hash, tags FROM entries").fetchall()
+    counts = {1: 0, 2: 0, 3: 0}
+    for row in rows:
+        tags = set(t.lower() for t in json.loads(row["tags"] or "[]"))
+        if tags & {'skill', 'decision', 'architecture', 'milestone', 'skill-compilation'}:
+            tier = 1
+        elif tags & {'youtube', 'transcript', 'raw-note'}:
+            tier = 3
+        else:
+            tier = 2
+        conn.execute("UPDATE entries SET tier = ? WHERE content_hash = ?", (tier, row["content_hash"]))
+        counts[tier] += 1
+    conn.commit()
+    conn.close()
+    return {"updated": counts, "total": sum(counts.values())}
 
 
 # ---------------------------------------------------------------------------

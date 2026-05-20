@@ -143,7 +143,7 @@ def retrieve(
     conn = _connect()
     if window is None:
         rows = conn.execute(
-            "SELECT content_hash, created_at, session_id, tags FROM entries "
+            "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
             "ORDER BY created_at DESC LIMIT 2000"
         ).fetchall()
     else:
@@ -152,14 +152,14 @@ def retrieve(
         if min_h > 0:
             older_than = (now - timedelta(hours=min_h)).isoformat()
             rows = conn.execute(
-                "SELECT content_hash, created_at, session_id, tags FROM entries "
+                "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
                 "WHERE created_at < ? AND created_at >= ? "
                 "ORDER BY created_at DESC LIMIT 2000",
                 (older_than, newer_than),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT content_hash, created_at, session_id, tags FROM entries "
+                "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
                 "WHERE created_at >= ? "
                 "ORDER BY created_at DESC LIMIT 2000",
                 (newer_than,),
@@ -197,10 +197,14 @@ def retrieve(
     if topic:
         query_vec = compute_embedding(topic)
     
+    TIER_WEIGHTS = {1: 1.5, 2: 1.0, 3: 0.5}
+
     for row in rows:
         ch = row["content_hash"]
         rec_score = _recency_score(row["created_at"], now)
-        
+        tier = row["tier"] if row["tier"] is not None else 2
+        tier_weight = TIER_WEIGHTS.get(tier, 1.0)
+
         if query_vec:
             # Get entry embedding for semantic score
             entry_vec = get_embedding(ch)
@@ -208,18 +212,19 @@ def retrieve(
                 sem_score = _cosine_similarity(query_vec, entry_vec)
             else:
                 sem_score = 0.0  # no embedding — low relevance
-            
-            combined = (relevance_weight * sem_score) + (recency_weight * rec_score)
+
+            combined = min(1.0, tier_weight * ((relevance_weight * sem_score) + (recency_weight * rec_score)))
         else:
             # No topic — pure recency ranking
-            combined = rec_score
+            combined = min(1.0, tier_weight * rec_score)
             sem_score = None
-        
+
         scored.append({
             "content_hash": ch,
             "created_at": row["created_at"],
             "session_id": row["session_id"],
             "tags": json.loads(row["tags"] or "[]"),
+            "tier": tier,
             "score": combined,
             "recency_score": rec_score,
             "relevance_score": sem_score,
