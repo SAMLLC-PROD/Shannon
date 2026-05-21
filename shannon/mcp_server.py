@@ -377,9 +377,12 @@ async def _handle_memory_save(args: dict[str, Any]) -> str:
         logger.warning("Embedding failed for %s: %s", content_hash, exc)
         embed_status = f"stored without embedding ({type(exc).__name__})"
 
+    # Return compact hash (not Zeckendorf address) — the full address
+    # is massive and confuses local models that receive MCP responses.
+    short_hash = content_hash[:12] if len(content_hash) > 12 else content_hash
     return (
         f"Memory saved successfully.\n"
-        f"- Address: `{content_hash}`\n"
+        f"- ID: `{short_hash}`\n"
         f"- Session: {session_id}\n"
         f"- Agent: {agent}\n"
         f"- Tags: {', '.join(tags) if tags else '(none)'}\n"
