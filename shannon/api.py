@@ -5,9 +5,9 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Header
 from pydantic import BaseModel
 
 from .store import _connect, write, read_by_hash, stats, init_store
@@ -16,10 +16,31 @@ from .embeddings import (
     embedding_stats, init_embeddings, compute_embedding,
 )
 from .retrieval import retrieve
+from .caas_api import router as caas_router
+from .tenants import authenticate, log_trial_request
 
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Shannon Memory Service", version="2.0")
+app.include_router(caas_router)
+
+
+# ---------------------------------------------------------------------------
+# Optional tenant auth — used by /memory endpoints to support both modes:
+#   - Bearer token present → CaaS tenant context
+#   - No token            → internal agent context (unchanged behaviour)
+# ---------------------------------------------------------------------------
+
+async def _optional_tenant(authorization: Annotated[Optional[str], Header()] = None) -> Optional[dict]:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.removeprefix("Bearer ").strip()
+    tenant = authenticate(token)
+    if tenant is None:
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
+    if tenant["status"] in ("paused", "wiped"):
+        raise HTTPException(status_code=403, detail=f"Tenant account is {tenant['status']}")
+    return tenant
 
 
 # ---------------------------------------------------------------------------
@@ -82,27 +103,38 @@ def health():
 # ---------------------------------------------------------------------------
 
 @app.get("/memory")
-def get_memory(
-    agent: str = Query(..., description="Agent ID"),
+async def get_memory(
+    agent: Optional[str] = Query(None, description="Agent ID (internal use; omit when using Bearer token)"),
     topic: Optional[str] = Query(None, description="Semantic search topic"),
     limit_tokens: int = Query(4000, description="Max tokens to return"),
     recency: str = Query("all", description="Time window: hot/warm/cold/all"),
+    authorization: Annotated[Optional[str], Header()] = None,
 ):
     init_store()
+    tenant = await _optional_tenant(authorization)
+
+    if tenant:
+        tid = tenant["tenant_id"]
+        log_trial_request(tid, "GET", "/memory")
+        result = retrieve(
+            tenant_id=tid,
+            topic=topic,
+            limit_tokens=limit_tokens,
+            recency=recency,
+        )
+        return {"tenant_id": tid, "topic": topic, **result}
+
+    # Internal agent path (unchanged behaviour)
+    if not agent:
+        raise HTTPException(status_code=422, detail="Provide ?agent=ID or a Bearer token")
     _ensure_agent(agent)
-    
     result = retrieve(
         agent_id=agent,
         topic=topic,
         limit_tokens=limit_tokens,
         recency=recency,
     )
-    
-    return {
-        "agent": agent,
-        "topic": topic,
-        **result,
-    }
+    return {"agent": agent, "topic": topic, **result}
 
 
 # ---------------------------------------------------------------------------
@@ -115,17 +147,19 @@ class MemoryPost(BaseModel):
     tags: List[str] = []
     session_id: Optional[str] = None
     tier: int = 2
+    profile_id: Optional[str] = None
 
 
 @app.post("/memory")
-def post_memory(payload: MemoryPost, background_tasks: BackgroundTasks):
+async def post_memory(
+    payload: MemoryPost,
+    background_tasks: BackgroundTasks,
+    authorization: Annotated[Optional[str], Header()] = None,
+):
     init_store()
-    _ensure_agent(payload.agent)
-    
-    tags = list(payload.tags)
-    if payload.agent not in tags:
-        tags.append(payload.agent)
+    tenant = await _optional_tenant(authorization)
 
+    tags = list(payload.tags)
     # Auto-tier: infer from tags if caller left default
     if payload.tier == 2:
         tag_set = set(t.lower() for t in tags)
@@ -138,12 +172,25 @@ def post_memory(payload: MemoryPost, background_tasks: BackgroundTasks):
     else:
         tier = payload.tier
 
-    write(payload.body, session_id=payload.session_id, tags=tags, tier=tier)
-    content_hash = hashlib.sha256(payload.body.encode("utf-8")).hexdigest()
-    
-    # Embed in background (non-blocking)
+    raw = payload.body.encode("utf-8")
+    if tenant:
+        tid = tenant["tenant_id"]
+        log_trial_request(tid, "POST", "/memory")
+        pid = payload.profile_id
+        # If auth is profile-scoped, force profile_id
+        if tenant and tenant.get('scope') == 'profile':
+            pid = tenant.get('profile_id')
+        write(payload.body, session_id=payload.session_id, tags=tags, tier=tier, tenant_id=tid, profile_id=pid)
+        content_hash = hashlib.sha256(f"{tid}\0".encode() + raw).hexdigest()
+    else:
+        # Internal agent path (unchanged behaviour)
+        _ensure_agent(payload.agent)
+        if payload.agent not in tags:
+            tags.append(payload.agent)
+        write(payload.body, session_id=payload.session_id, tags=tags, tier=tier)
+        content_hash = hashlib.sha256(raw).hexdigest()
+
     background_tasks.add_task(embed_and_store, content_hash, payload.body)
-    
     return {"id": content_hash, "ok": True}
 
 
@@ -152,23 +199,34 @@ def post_memory(payload: MemoryPost, background_tasks: BackgroundTasks):
 # ---------------------------------------------------------------------------
 
 @app.get("/memory/search")
-def search_memory(
+async def search_memory(
     q: str = Query(..., description="Search query"),
-    agent: Optional[str] = Query(None, description="Filter to agent"),
+    agent: Optional[str] = Query(None, description="Filter to agent (internal)"),
     limit: int = Query(10, description="Max results"),
+    authorization: Annotated[Optional[str], Header()] = None,
 ):
     init_store()
     now = datetime.now(timezone.utc)
-    
+    tenant = await _optional_tenant(authorization)
+
     conn = _connect()
-    rows = conn.execute(
-        "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
-        "ORDER BY created_at DESC LIMIT 2000"
-    ).fetchall()
+    if tenant:
+        tid = tenant["tenant_id"]
+        log_trial_request(tid, "GET", "/memory/search")
+        rows = conn.execute(
+            "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
+            "WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 2000",
+            (tid,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
+            "WHERE tenant_id IS NULL ORDER BY created_at DESC LIMIT 2000"
+        ).fetchall()
     conn.close()
-    
-    # Agent filter
-    if agent:
+
+    # Agent filter (internal only)
+    if agent and not tenant:
         _ensure_agent(agent)
         rows = [
             r for r in rows

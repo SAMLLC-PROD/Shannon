@@ -1,0 +1,366 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Shannon Memory \u2014 CaaS",
+    "description": "Persistent knowledge memory for domain experts. Query, save, and manage\nknowledge across conversations. Supports multiple knowledge profiles\n(e.g., different car builds, different projects).\n\nIMPORTANT INSTRUCTIONS FOR THE GPT:\n- At the START of every conversation, call list_profiles to see available knowledge bases\n- When the user mentions a specific project/build/topic, call query_memory to check for prior knowledge\n- When the user shares new information worth remembering, call save_memory\n- When switching between topics, use the profile_id parameter to scope queries\n- Always mention when you're using recalled knowledge: \"From your saved notes...\"\n- Include source links when referencing saved entries so the user can verify\n",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://latticeproxy.io/shannon",
+      "description": "Shannon CaaS via lattice-proxy tunnel"
+    }
+  ],
+  "paths": {
+    "/memory": {
+      "get": {
+        "operationId": "query_memory",
+        "summary": "Search knowledge memory for relevant context",
+        "description": "Query the user's saved knowledge by topic. Returns semantically relevant\nentries within a token budget. Use this BEFORE answering domain questions\nto check if the user has prior knowledge saved.\n",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "default"
+            },
+            "description": "Agent identifier (use \"default\" for general queries)"
+          },
+          {
+            "name": "topic",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Semantic search topic (e.g., \"LS3 turbo AFR tuning\", \"K-series cam specs\")"
+          },
+          {
+            "name": "limit_tokens",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 4000
+            },
+            "description": "Maximum tokens to return"
+          },
+          {
+            "name": "profile_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter to a specific knowledge profile (from list_profiles)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retrieved memory entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "body": {
+                            "type": "string"
+                          },
+                          "tags": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "created_at": {
+                            "type": "string"
+                          },
+                          "session_id": {
+                            "type": "string"
+                          },
+                          "id": {
+                            "type": "string",
+                            "description": "Entry ID for source viewer links"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "save_memory",
+        "summary": "Save new knowledge to persistent memory",
+        "description": "Save important information the user shares \u2014 tuning values, build specs,\nlessons learned, reference data. This persists across all future conversations.\nTag entries with relevant keywords for better retrieval.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "body"
+                ],
+                "properties": {
+                  "body": {
+                    "type": "string",
+                    "description": "The knowledge to save"
+                  },
+                  "agent": {
+                    "type": "string",
+                    "default": "default"
+                  },
+                  "tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Keyword tags for retrieval (e.g., [\"ls3\", \"turbo\", \"afr\"])"
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "description": "Session identifier (e.g., \"2026-05-25-ls3-build\")"
+                  },
+                  "profile_id": {
+                    "type": "string",
+                    "description": "Knowledge profile to save under"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Entry saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/memory/search": {
+      "get": {
+        "operationId": "search_memory",
+        "summary": "Keyword search across saved knowledge",
+        "description": "Fallback keyword search when semantic search isn't specific enough.\nUse for exact terms, part numbers, specific values.\n",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Search query"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tenant/profiles": {
+      "get": {
+        "operationId": "list_profiles",
+        "summary": "List all knowledge profiles",
+        "description": "Returns all knowledge profiles (sub-accounts) for this user.\nEach profile is a separate knowledge base \u2014 e.g., \"LS3 Turbo Builds\",\n\"K-Series NA\", \"Customer Cars\". Call this at the start of every conversation\nto know what knowledge bases are available.\n",
+        "responses": {
+          "200": {
+            "description": "List of profiles",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profiles": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "profile_id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "entry_count": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_profile",
+        "summary": "Create a new knowledge profile",
+        "description": "Create a new knowledge profile when the user starts working on a\ndistinct project or topic area they want to keep separate.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Profile name (e.g., \"LS3 Turbo Builds\")"
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Brief description"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Profile created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile_id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tenant/status": {
+      "get": {
+        "operationId": "check_status",
+        "summary": "Check account status and storage usage",
+        "responses": {
+          "200": {
+            "description": "Account status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tenant/export": {
+      "get": {
+        "operationId": "export_knowledge",
+        "summary": "Export knowledge as structured markdown",
+        "description": "Generate a formatted markdown export of saved knowledge.\nIncludes YouTube timestamp links and source references.\nUseful for sharing context with other people or tools.\n",
+        "parameters": [
+          {
+            "name": "topic",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by topic"
+          },
+          {
+            "name": "limit_tokens",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 8000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Markdown export",
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Tenant auth token from registration"
+      }
+    }
+  },
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ]
+}

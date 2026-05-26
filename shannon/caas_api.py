@@ -1,0 +1,381 @@
+"""Shannon CaaS — FastAPI router for multi-tenant endpoints.
+
+Mounts on the main app. New routes:
+  POST /tenant/register
+  GET  /tenant/status
+  POST /tenant/pause
+  POST /tenant/wipe
+  GET  /tenant/export
+  GET  /source/{entry_id}
+
+The existing /memory endpoints gain optional bearer-token auth:
+  - Bearer token present → tenant-scoped read/write
+  - No bearer token     → existing internal agent behavior unchanged
+"""
+
+import logging
+from typing import Annotated, Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, EmailStr
+
+from .tenants import (
+    authenticate,
+    get_tenant_stats,
+    log_trial_request,
+    pause_tenant,
+    register_tenant,
+    wipe_tenant,
+    init_tenant_schema,
+)
+from .export import export_tenant_memory
+from .source_viewer import auth_error_page, render_source_page
+
+log = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# Auth dependency
+# ---------------------------------------------------------------------------
+
+async def _get_tenant(authorization: Annotated[Optional[str], Header()] = None) -> Optional[dict]:
+    """
+    Extract and validate bearer token from Authorization header.
+    Supports both tenant-wide tokens and profile-scoped tokens.
+    Profile tokens restrict ALL queries to that single profile's data.
+    """
+    if not authorization:
+        return None
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization must be Bearer token")
+
+    token = authorization.removeprefix("Bearer ").strip()
+    
+    # Try profile-scoped token first
+    from .tenants import authenticate_profile
+    profile_auth = authenticate_profile(token)
+    if profile_auth:
+        return profile_auth  # has scope="profile", profile_id set
+    
+    # Fall back to tenant-wide token
+    tenant = authenticate(token)
+
+    if tenant is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    status = tenant["status"]
+    if status == "paused":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Your trial has ended and your account is paused. "
+                "Contact us at shannon@latticeproxy.io to continue. "
+                "Your data is retained for 30 days."
+            ),
+        )
+    if status == "wiped":
+        raise HTTPException(status_code=403, detail="Account data has been wiped.")
+
+    return tenant
+
+
+RequiredTenant = Annotated[dict, Depends(_get_tenant)]
+
+
+async def _require_tenant(authorization: Annotated[Optional[str], Header()] = None) -> dict:
+    """Like _get_tenant but raises 401 if no token provided."""
+    tenant = await _get_tenant(authorization)
+    if tenant is None:
+        raise HTTPException(status_code=401, detail="Bearer token required for this endpoint")
+    return tenant
+
+
+AuthRequired = Annotated[dict, Depends(_require_tenant)]
+
+
+# ---------------------------------------------------------------------------
+# POST /tenant/register
+# ---------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    email: str
+    display_name: Optional[str] = None
+
+
+@router.post("/tenant/register", status_code=201)
+def register(payload: RegisterRequest):
+    """
+    Register a new tenant. Returns tenant_id and auth_token.
+    The auth_token is shown once — store it securely.
+    Trial: 14 days free, then paused (not deleted). No auto-charge.
+    """
+    init_tenant_schema()
+    # Basic email sanity check
+    if "@" not in payload.email or len(payload.email) < 5:
+        raise HTTPException(status_code=422, detail="Valid email required")
+
+    try:
+        tenant_id, token = register_tenant(
+            email=payload.email,
+            display_name=payload.display_name or "",
+        )
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(status_code=409, detail="Email already registered")
+        log.exception("Registration failed")
+        raise HTTPException(status_code=500, detail="Registration failed")
+
+    return {
+        "tenant_id": tenant_id,
+        "auth_token": token,
+        "message": (
+            "Store your auth_token securely — it won't be shown again. "
+            "Use it as a Bearer token on all /memory requests."
+        ),
+        "trial_days": 14,
+        "note": "No auto-charge. You'll be paused (not deleted) after 14 days.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /tenant/status
+# ---------------------------------------------------------------------------
+
+@router.get("/tenant/status")
+def tenant_status(tenant: AuthRequired):
+    """Return trial status, entry count, and storage used for the calling tenant."""
+    stats = get_tenant_stats(tenant["tenant_id"])
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# POST /tenant/pause
+# ---------------------------------------------------------------------------
+
+@router.post("/tenant/pause")
+def tenant_pause(tenant: AuthRequired):
+    """Manually pause service. Data is retained; 30-day grace period starts now."""
+    tid = tenant["tenant_id"]
+    pause_tenant(tid)
+    return {
+        "ok": True,
+        "tenant_id": tid,
+        "message": "Account paused. Data retained for 30 days. Contact us to resume.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /tenant/wipe
+# ---------------------------------------------------------------------------
+
+class WipeRequest(BaseModel):
+    confirm: bool  # must be True
+
+
+@router.post("/tenant/wipe")
+def tenant_wipe(payload: WipeRequest, tenant: AuthRequired):
+    """Permanently delete all tenant data. Irreversible."""
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=422,
+            detail='Set {"confirm": true} to confirm permanent data deletion.',
+        )
+    tid = tenant["tenant_id"]
+    wipe_tenant(tid)
+    return {
+        "ok": True,
+        "tenant_id": tid,
+        "message": "All data permanently deleted.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /tenant/export
+# ---------------------------------------------------------------------------
+
+@router.get("/tenant/export")
+def tenant_export(
+    tenant: AuthRequired,
+    topic: Optional[str] = Query(None, description="Semantic topic filter"),
+    format: str = Query("markdown", description="Output format (markdown only for now)"),
+    limit_tokens: int = Query(8000, ge=500, le=32000, description="Max token budget"),
+):
+    """
+    Export tenant's knowledge as a structured markdown document.
+    Designed to paste into ChatGPT / Claude / Gemini as context.
+    YouTube references include timestamps; file references include paths.
+    """
+    tid = tenant["tenant_id"]
+    log_trial_request(tid, "GET", "/tenant/export")
+
+    markdown = export_tenant_memory(
+        tenant_id=tid,
+        topic=topic,
+        limit_tokens=limit_tokens,
+        format=format,
+    )
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="shannon-export.md"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /source/{entry_id}  — HTML source viewer
+# ---------------------------------------------------------------------------
+
+@router.get("/source/{entry_id}", response_class=HTMLResponse)
+def source_viewer(
+    entry_id: str,
+    request: Request,
+    token: Optional[str] = Query(None, description="Auth token"),
+):
+    """
+    Clean HTML page showing the source material for a memory entry.
+    Auth: token query param OR Authorization Bearer header.
+    Internal admin access (no token) is allowed for null-tenant entries.
+    """
+    # Try token from query param first, then Authorization header
+    auth_header = request.headers.get("authorization", "")
+    bearer = None
+    if token:
+        bearer = token
+    elif auth_header.startswith("Bearer "):
+        bearer = auth_header.removeprefix("Bearer ").strip()
+
+    if bearer:
+        tenant = authenticate(bearer)
+        if tenant is None:
+            return HTMLResponse(content=auth_error_page(), status_code=401)
+        if tenant["status"] in ("paused", "wiped"):
+            return HTMLResponse(content=auth_error_page(), status_code=403)
+
+        # Verify this tenant owns the entry
+        from .store import _connect
+        conn = _connect()
+        row = conn.execute(
+            "SELECT tenant_id FROM entries WHERE content_hash = ?", (entry_id,)
+        ).fetchone()
+        conn.close()
+
+        if row is None:
+            return HTMLResponse(
+                content=render_source_page(entry_id, tenant_id=None),
+                status_code=404,
+            )
+
+        entry_tenant = row["tenant_id"]
+        if entry_tenant is not None and entry_tenant != tenant["tenant_id"]:
+            return HTMLResponse(content=auth_error_page(), status_code=403)
+
+        html_content = render_source_page(entry_id, tenant_id=tenant["tenant_id"])
+        return HTMLResponse(content=html_content)
+
+    # No token provided — allow access only for internal (null tenant_id) entries
+    from .store import _connect
+    conn = _connect()
+    row = conn.execute(
+        "SELECT tenant_id FROM entries WHERE content_hash = ?", (entry_id,)
+    ).fetchone()
+    conn.close()
+
+    if row is None:
+        return HTMLResponse(content=render_source_page(entry_id), status_code=404)
+
+    if row["tenant_id"] is not None:
+        # Tenant-owned entry requires auth
+        return HTMLResponse(content=auth_error_page(), status_code=401)
+
+    return HTMLResponse(content=render_source_page(entry_id))
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Profile endpoints
+# ---------------------------------------------------------------------------
+
+from .tenants import create_profile, list_profiles, delete_profile, get_profile
+
+
+class CreateProfileRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+
+
+@router.post("/tenant/profiles", status_code=201)
+def create_profile_endpoint(payload: CreateProfileRequest, tenant: AuthRequired):
+    """Create a new knowledge profile (e.g., 'LS3 Turbo Builds', 'K-Series NA')."""
+    profile_id = create_profile(
+        tenant_id=tenant["tenant_id"],
+        name=payload.name,
+        description=payload.description or "",
+    )
+    return {"profile_id": profile_id, "name": payload.name}
+
+
+@router.get("/tenant/profiles")
+def list_profiles_endpoint(tenant: AuthRequired):
+    """List all knowledge profiles with entry counts."""
+    profiles = list_profiles(tenant["tenant_id"])
+    return {"profiles": profiles}
+
+
+class DeleteProfileRequest(BaseModel):
+    confirm: bool
+
+
+@router.delete("/tenant/profiles/{profile_id}")
+def delete_profile_endpoint(
+    profile_id: str, payload: DeleteProfileRequest, tenant: AuthRequired
+):
+    """Delete a knowledge profile and all its entries."""
+    if not payload.confirm:
+        raise HTTPException(status_code=422, detail='Set {"confirm": true}')
+    deleted = delete_profile(tenant["tenant_id"], profile_id)
+    if deleted == 0 and not get_profile(tenant["tenant_id"], profile_id):
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"ok": True, "entries_deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# Token toggle — disable/enable Shannon access
+# ---------------------------------------------------------------------------
+
+from .tenants import disable_token, enable_token
+
+@router.post("/tenant/disable")
+def disable_access(tenant: AuthRequired):
+    """Kill switch — immediately revoke all access. Data retained."""
+    tid = tenant["tenant_id"]
+    disable_token(tid)
+    return {
+        "ok": True,
+        "tenant_id": tid,
+        "message": "Access disabled. All API calls will fail. Data is retained. Call /tenant/enable to restore.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Profile-scoped token auth — cryptographic data separation
+# ---------------------------------------------------------------------------
+
+from .tenants import authenticate_profile, generate_profile_token
+
+@router.post("/tenant/profiles/{profile_id}/token")
+def generate_token_for_profile(profile_id: str, tenant: AuthRequired):
+    """Generate an access token scoped to a single profile.
+    This token can ONLY read/write data in this one profile.
+    Give this token to someone and they can only see this profile's data."""
+    try:
+        token = generate_profile_token(tenant["tenant_id"], profile_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "profile_id": profile_id,
+        "profile_token": token,
+        "message": "This token only has access to this single profile. No other data is visible.",
+    }

@@ -108,6 +108,7 @@ def _parse_dt(ts: str) -> datetime:
 
 def retrieve(
     agent_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
     topic: Optional[str] = None,
     limit_tokens: int = 4000,
     recency: str = "all",
@@ -116,21 +117,23 @@ def retrieve(
 ) -> dict:
     """
     Token-budgeted retrieval with combined scoring.
-    
+
     Args:
-        agent_id: filter to entries tagged with this agent
+        agent_id: filter to entries tagged with this agent (internal use)
+        tenant_id: filter to entries owned by this tenant (CaaS use).
+                   When set, agent_id is ignored and strict tenant isolation applies.
         topic: semantic query for relevance scoring (if None, recency-only)
         limit_tokens: maximum tokens in response
         recency: time window filter (hot/warm/cold/all)
         relevance_weight: weight for semantic similarity (0-1)
         recency_weight: weight for recency (0-1)
-    
+
     Returns:
         dict with entries, total_tokens, truncated flag
     """
     init_store()
     now = datetime.now(timezone.utc)
-    
+
     # Time window filter
     WINDOWS = {
         "hot": (0, 48),
@@ -139,12 +142,29 @@ def retrieve(
         "all": None,
     }
     window = WINDOWS.get(recency)
-    
+
     conn = _connect()
+
+    # Build base query with tenant isolation baked into SQL.
+    # tenant_id provided  → strict filter: only that tenant's rows
+    # tenant_id is None, agent_id set → internal: only null-tenant rows
+    # both None           → no filter (admin/compat mode)
+    if tenant_id is not None:
+        tenant_clause = "AND tenant_id = ?"
+        tenant_params: tuple = (tenant_id,)
+    elif agent_id is not None:
+        # Internal agents only see entries without a tenant_id (null = internal)
+        tenant_clause = "AND tenant_id IS NULL"
+        tenant_params = ()
+    else:
+        tenant_clause = ""
+        tenant_params = ()
+
     if window is None:
         rows = conn.execute(
-            "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
-            "ORDER BY created_at DESC LIMIT 2000"
+            f"SELECT content_hash, created_at, session_id, tags, tier FROM entries "
+            f"WHERE 1=1 {tenant_clause} ORDER BY created_at DESC LIMIT 2000",
+            tenant_params,
         ).fetchall()
     else:
         min_h, max_h = window
@@ -152,20 +172,20 @@ def retrieve(
         if min_h > 0:
             older_than = (now - timedelta(hours=min_h)).isoformat()
             rows = conn.execute(
-                "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
-                "WHERE created_at < ? AND created_at >= ? "
-                "ORDER BY created_at DESC LIMIT 2000",
-                (older_than, newer_than),
+                f"SELECT content_hash, created_at, session_id, tags, tier FROM entries "
+                f"WHERE created_at < ? AND created_at >= ? {tenant_clause} "
+                f"ORDER BY created_at DESC LIMIT 2000",
+                (older_than, newer_than, *tenant_params),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
-                "WHERE created_at >= ? "
-                "ORDER BY created_at DESC LIMIT 2000",
-                (newer_than,),
+                f"SELECT content_hash, created_at, session_id, tags, tier FROM entries "
+                f"WHERE created_at >= ? {tenant_clause} "
+                f"ORDER BY created_at DESC LIMIT 2000",
+                (newer_than, *tenant_params),
             ).fetchall()
     conn.close()
-    
+
     # Supersession filter — remove entries that have been explicitly
     # superseded by newer entries (retraction/replacement detected at write time).
     superseded = get_superseded_hashes()
@@ -177,10 +197,11 @@ def retrieve(
                 "Supersession: filtered %d superseded entries",
                 pre_count - len(rows),
             )
-    
-    # Agent filter — if agent has tagged entries, filter to those.
+
+    # Agent filter (internal only, not used when tenant_id is set).
+    # If agent has tagged entries, filter to those.
     # If no entries match the agent tag, return ALL entries (agent sees everything).
-    if agent_id:
+    if agent_id and tenant_id is None:
         agent_rows = [
             r for r in rows
             if agent_id in json.loads(r["tags"] or "[]")

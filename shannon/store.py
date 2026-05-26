@@ -15,7 +15,7 @@ import hashlib
 import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Set
+from typing import Dict, List, Optional, Set
 
 try:
     import zstandard as zstd
@@ -80,18 +80,32 @@ def _connect() -> sqlite3.Connection:
 # Write
 # ---------------------------------------------------------------------------
 
-def write(data: str, session_id: str = None, tags: List[str] = None, tier: int = 2) -> str:
+def write(
+    data: str,
+    session_id: str = None,
+    tags: List[str] = None,
+    tier: int = 2,
+    tenant_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+) -> str:
     """
     Write a context chunk to the Shannon dictionary.
 
     Returns the Zeckendorf address string. Idempotent — writing the same
     data twice returns the same address without duplicating storage.
+    tenant_id=None means internal (guy/henry/etc); provide a UUID for CaaS tenants.
     """
     init_store()
-    raw          = data.encode("utf-8")
-    content_hash = hashlib.sha256(raw).hexdigest()
-    address      = data_to_address(raw)
-    addr_str     = address_to_str(address)
+    raw = data.encode("utf-8")
+    # Tenant entries get a per-tenant hash so the same text from two different
+    # tenants produces distinct entries (full namespace isolation).
+    # Internal writes (tenant_id=None) use the plain content hash as before.
+    if tenant_id is not None:
+        content_hash = hashlib.sha256(f"{tenant_id}\0".encode() + raw).hexdigest()
+    else:
+        content_hash = hashlib.sha256(raw).hexdigest()
+    address  = data_to_address(raw)
+    addr_str = address_to_str(address)
 
     # --- Store compressed chunk ---
     chunk_path = CHUNKS_DIR / f"{content_hash}.zst"
@@ -102,12 +116,24 @@ def write(data: str, session_id: str = None, tags: List[str] = None, tier: int =
             compressed = raw  # fallback: store raw if zstd not installed
         chunk_path.write_bytes(compressed)
 
-    # --- Index entry (idempotent) ---
+    # --- Index entry (idempotent on content_hash) ---
     conn = _connect()
+    # Ensure tenant_id column exists (migration guard)
+    try:
+        conn.execute("ALTER TABLE entries ADD COLUMN tenant_id TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    # Ensure profile_id column exists
+    try:
+        conn.execute("ALTER TABLE entries ADD COLUMN profile_id TEXT")
+        conn.commit()
+    except Exception:
+        pass
     conn.execute(
         """INSERT OR IGNORE INTO entries
-           (content_hash, address, created_at, session_id, tags, byte_size, tier)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (content_hash, address, created_at, session_id, tags, byte_size, tier, tenant_id, profile_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             content_hash,
             addr_str,
@@ -116,6 +142,8 @@ def write(data: str, session_id: str = None, tags: List[str] = None, tier: int =
             json.dumps(tags or []),
             len(raw),
             tier,
+            tenant_id,
+            profile_id,
         ),
     )
     conn.commit()

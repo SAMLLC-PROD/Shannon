@@ -225,3 +225,74 @@ print(response["content"])
 ```
 
 ---
+
+## CaaS — Context as a Service (Multi-Tenant)
+
+Shannon supports external users renting persistent context for any LLM.
+
+### Business model
+
+| Stage | Details |
+|-------|---------|
+| **Free trial** | 14 days, full access |
+| **After trial** | Account paused — data retained, access suspended |
+| **Grace period** | 30 days after pause. No auto-charge — user must opt in to continue |
+| **Auto-wipe** | If not renewed after grace period, all data permanently deleted |
+
+### Quick start
+
+```bash
+# 1. Register
+curl -X POST http://localhost:8765/tenant/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "display_name": "Your Name"}'
+# → {"tenant_id": "...", "auth_token": "...", "trial_days": 14}
+
+# 2. Save memory
+curl -X POST http://localhost:8765/memory \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"body": "Decision: use FastAPI for all backend services", "agent": "me", "tags": ["decision"]}'
+
+# 3. Retrieve memory
+curl "http://localhost:8765/memory?topic=architecture" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# 4. Export as markdown (paste into any LLM)
+curl "http://localhost:8765/tenant/export?topic=architecture" \
+  -H "Authorization: Bearer YOUR_TOKEN" > context.md
+
+# 5. Check trial status
+curl http://localhost:8765/tenant/status \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### API routes
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `POST` | `/tenant/register` | Register (email → token) |
+| `GET` | `/tenant/status` | Trial status, entry count, storage |
+| `POST` | `/tenant/pause` | Pause service (data retained) |
+| `POST` | `/tenant/wipe` | Permanently delete all data |
+| `GET` | `/tenant/export` | Export as markdown (`?topic=X&limit_tokens=8000`) |
+| `GET` | `/source/{entry_id}` | HTML source viewer (`?token=AUTH_TOKEN`) |
+
+Existing `/memory` endpoints work for both internal agents (no token) and tenants (Bearer token).
+
+### Data isolation
+
+- Tenant writes hash as `SHA256(tenant_id + "\0" + content)` — same text from two tenants → distinct entries
+- All SQL queries filter by `tenant_id` at the database level; no cross-tenant leakage is architecturally possible
+- Internal agents (guy, henry) remain on `tenant_id = NULL` — unchanged
+
+### New files
+
+| File | Purpose |
+|------|---------|
+| `shannon/tenants.py` | Tenant DB, auth, trial lifecycle |
+| `shannon/export.py` | Markdown context export |
+| `shannon/source_viewer.py` | HTML source page renderer |
+| `shannon/caas_api.py` | FastAPI router for all CaaS routes |
+
+---
