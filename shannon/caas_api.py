@@ -365,6 +365,43 @@ def disable_access(tenant: AuthRequired):
 
 from .tenants import authenticate_profile, generate_profile_token
 
+
+# ---------------------------------------------------------------------------
+# POST /tenant/resolve-conflict (Issue #17)
+# ---------------------------------------------------------------------------
+
+class ResolveConflictRequest(BaseModel):
+    conflict_group_id: str
+    winning_entry_id: str
+
+
+@router.post("/tenant/resolve-conflict")
+def resolve_conflict_endpoint(payload: ResolveConflictRequest, tenant: AuthRequired):
+    """
+    Resolve a detected conflict by declaring a winning entry.
+    The losing entries in the group are deprioritized (0.3x score multiplier)
+    but not deleted.
+    """
+    from .store import resolve_conflict
+    tid = tenant["tenant_id"]
+    updated = resolve_conflict(
+        conflict_group_id=payload.conflict_group_id,
+        winning_entry_id=payload.winning_entry_id,
+        tenant_id=tid,
+    )
+    if updated == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Conflict group not found or no entries to supersede",
+        )
+    return {
+        "ok": True,
+        "conflict_group_id": payload.conflict_group_id,
+        "winning_entry_id": payload.winning_entry_id,
+        "entries_superseded": updated,
+    }
+
+
 @router.post("/tenant/profiles/{profile_id}/token")
 def generate_token_for_profile(profile_id: str, tenant: AuthRequired):
     """Generate an access token scoped to a single profile.

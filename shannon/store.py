@@ -67,6 +67,16 @@ def init_store() -> None:
         conn.commit()
     except Exception:
         pass  # column already exists
+    # Conflict detection columns (Issue #17)
+    for col_ddl in [
+        "ALTER TABLE entries ADD COLUMN conflict_group_id TEXT",
+        "ALTER TABLE entries ADD COLUMN superseded_by TEXT",
+    ]:
+        try:
+            conn.execute(col_ddl)
+            conn.commit()
+        except Exception:
+            pass
     conn.close()
 
 
@@ -287,6 +297,44 @@ def get_superseded_hashes() -> Set[str]:
         except (json.JSONDecodeError, TypeError):
             pass
     return result
+
+
+def resolve_conflict(
+    conflict_group_id: str,
+    winning_entry_id: str,
+    tenant_id: Optional[str] = None,
+) -> int:
+    """
+    Mark all non-winning entries in a conflict group as superseded.
+    Returns the number of entries marked.
+    """
+    init_store()
+    conn = _connect()
+
+    if tenant_id:
+        rows = conn.execute(
+            "SELECT content_hash FROM entries "
+            "WHERE conflict_group_id = ? AND tenant_id = ?",
+            (conflict_group_id, tenant_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT content_hash FROM entries WHERE conflict_group_id = ?",
+            (conflict_group_id,),
+        ).fetchall()
+
+    updated = 0
+    for row in rows:
+        if row["content_hash"] != winning_entry_id:
+            conn.execute(
+                "UPDATE entries SET superseded_by = ? WHERE content_hash = ?",
+                (winning_entry_id, row["content_hash"]),
+            )
+            updated += 1
+
+    conn.commit()
+    conn.close()
+    return updated
 
 
 # ---------------------------------------------------------------------------

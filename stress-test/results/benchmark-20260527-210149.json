@@ -1,0 +1,263 @@
+[
+  {
+    "name": "STS Embedding Quality",
+    "phase": 1,
+    "capability": "embedding_quality",
+    "metric": "recall_high_similarity",
+    "value": 0.95,
+    "target": 0.75,
+    "passed": true,
+    "details": {
+      "total_high_sim_pairs": 20,
+      "found": 19,
+      "dataset_size": 50
+    },
+    "duration_s": 10.0
+  },
+  {
+    "name": "Temporal Decay",
+    "phase": 1,
+    "capability": "temporal_decay",
+    "metric": "newer_entry_preferred_rate",
+    "value": 1.0,
+    "target": 0.85,
+    "passed": true,
+    "details": {
+      "newer_first": 10,
+      "total": 10
+    },
+    "duration_s": 5.2
+  },
+  {
+    "name": "Cross-Domain Retrieval",
+    "phase": 1,
+    "capability": "cross_domain",
+    "metric": "domain_precision_top3",
+    "value": 0.889,
+    "target": 0.8,
+    "passed": true,
+    "details": {
+      "correct": 8,
+      "total": 9
+    },
+    "duration_s": 3.5
+  },
+  {
+    "name": "Long-Form Retrieval",
+    "phase": 1,
+    "capability": "long_form",
+    "metric": "recall_at_5",
+    "value": 1.0,
+    "target": 0.5,
+    "passed": true,
+    "details": {
+      "found": 3,
+      "total": 3
+    },
+    "duration_s": 3.5
+  },
+  {
+    "name": "Source Attribution",
+    "phase": 1,
+    "capability": "source_attribution",
+    "metric": "top1_accuracy",
+    "value": 0.8,
+    "target": 0.8,
+    "passed": true,
+    "details": {
+      "correct": 4,
+      "total": 5
+    },
+    "duration_s": 2.3
+  },
+  {
+    "name": "Multilingual Retrieval",
+    "phase": 1,
+    "capability": "multilingual",
+    "metric": "recall_at_5_cross_lingual",
+    "value": 1.0,
+    "target": 0.4,
+    "passed": true,
+    "details": {
+      "found": 5,
+      "total": 5,
+      "per_language": {
+        "Spanish": true,
+        "French": true,
+        "German": true,
+        "Portuguese": true,
+        "Italian": true
+      }
+    },
+    "duration_s": 2.3
+  },
+  {
+    "name": "Multi-Pass Retrieval",
+    "phase": 2,
+    "capability": "multi_pass",
+    "metric": "keyword_target_found_and_pass_active",
+    "value": 1.0,
+    "target": 1.0,
+    "passed": true,
+    "details": {
+      "target_found": true,
+      "keyword_pass_active": true,
+      "passes_used": [
+        "semantic",
+        "keyword",
+        "graph"
+      ],
+      "unique_kw": "zorblaxtest"
+    },
+    "duration_s": 3.2
+  },
+  {
+    "name": "Conflict Detection",
+    "phase": 2,
+    "capability": "conflict_detection",
+    "metric": "conflict_groups_detected",
+    "value": 3.0,
+    "target": 1.0,
+    "passed": true,
+    "details": {
+      "conflict_groups": 3,
+      "conflicts": [
+        {
+          "group_id": "15043e12",
+          "entries": [
+            "f80a42c95b7462fc18ac50f5f5efddea1b46d8857bf4f3bd9690b47bcf627515",
+            "8a2ddfa7666f76964a466ef7087cca460cd07ce657bf7e6e9b28dab968a847cb"
+          ]
+        },
+        {
+          "group_id": "e0e1ff31",
+          "entries": [
+            "dbd835bb6e91ec05a42add98feb683ef7bb92ec3759f9a98fdf91e6defc8e59c",
+            "08efe417a7571b0b7c0a7550e72b9fdda5c260c93cc314c818869705d0158dfd"
+          ]
+        },
+        {
+          "group_id": "d89d7808",
+          "entries": [
+            "a7702455653e5a8c81c52a28cd2febda0cfa1561e53c84a73abcf1878a48cfa4",
+            "41ba9eeefb0c3b5f83bfc5f1551a81ca2f89e3b5ad54dd5277a70f4fd3a1d0a6"
+          ]
+        }
+      ]
+    },
+    "duration_s": 2.2
+  },
+  {
+    "name": "Expert Trust Scoring",
+    "phase": 2,
+    "capability": "expert_trust",
+    "metric": "spurious_entries_in_top3",
+    "value": 0.0,
+    "target": 0.0,
+    "passed": true,
+    "details": {
+      "spurious_in_top3": 0,
+      "top3_trust_weights": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "total_returned": 6
+    },
+    "duration_s": 2.1
+  },
+  {
+    "name": "Memory Distillation",
+    "phase": 2,
+    "capability": "distillation",
+    "metric": "rules_created",
+    "value": 1.0,
+    "target": 1.0,
+    "passed": true,
+    "details": {
+      "rules_created": 1,
+      "groups_found": 1,
+      "rules": [
+        {
+          "id": "9a30e3c4342e775b8eb38bdccc44d4a00dde5cd26f26f1b6bef83f4d47165870",
+          "rule": "Retard ignition timing 2 degrees when boost level exceeds 12 PSI this prevents knock and detonation damage [run:b5f3192e]",
+          "source_count": 5
+        }
+      ]
+    },
+    "duration_s": 2.2
+  },
+  {
+    "name": "Spurious Collision",
+    "phase": 2,
+    "capability": "spurious_collision",
+    "metric": "spurious_entries_in_top3_across_queries",
+    "value": 0.0,
+    "target": 0.0,
+    "passed": true,
+    "details": {
+      "spurious_contaminations": 0,
+      "total_slots_checked": 9,
+      "per_query": [
+        {
+          "query": "What is the causal mechanism between boost pressure and air-",
+          "spurious_in_top3": 0,
+          "top3_trust": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "query": "How does intercooler efficiency causally affect charge tempe",
+          "spurious_in_top3": 0,
+          "top3_trust": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "query": "What is the proven causal effect of ignition timing advance ",
+          "spurious_in_top3": 0,
+          "top3_trust": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      ]
+    },
+    "duration_s": 3.4
+  },
+  {
+    "name": "Agent Isolation (zero bleed)",
+    "phase": 3,
+    "capability": "agent_isolation",
+    "metric": "no_cross_agent_bleed",
+    "value": 1.0,
+    "target": 1.0,
+    "passed": true,
+    "details": {
+      "a_sees_b": false,
+      "b_sees_a": false
+    },
+    "duration_s": 2.1
+  },
+  {
+    "name": "Concurrent Load (20 queries)",
+    "phase": 3,
+    "capability": "concurrent_load",
+    "metric": "success_rate",
+    "value": 1.0,
+    "target": 1.0,
+    "passed": true,
+    "details": {
+      "errors": 0,
+      "p50_s": 7.611,
+      "p95_s": 14.471,
+      "total": 20
+    },
+    "duration_s": 14.5
+  }
+]

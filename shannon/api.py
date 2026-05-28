@@ -427,3 +427,69 @@ def backfill_tiers():
 @app.get("/embeddings/stats")
 def get_embedding_stats():
     return embedding_stats()
+
+
+# ---------------------------------------------------------------------------
+# GET /rules — list distilled rules (Issue #18)
+# ---------------------------------------------------------------------------
+
+@app.get("/rules")
+def list_rules_endpoint(agent: Optional[str] = Query(None, description="Filter by agent ID")):
+    from .distillation import list_rules
+    rules = list_rules(agent)
+    return {"rules": rules, "count": len(rules)}
+
+
+# ---------------------------------------------------------------------------
+# DELETE /rules/{entry_id}
+# ---------------------------------------------------------------------------
+
+@app.delete("/rules/{entry_id}")
+def delete_rule_endpoint(entry_id: str):
+    from .distillation import delete_rule
+    ok = delete_rule(entry_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Rule not found or entry is not a rule")
+    return {"ok": True, "entry_id": entry_id}
+
+
+# ---------------------------------------------------------------------------
+# POST /distill — trigger manual distillation scan
+# ---------------------------------------------------------------------------
+
+@app.post("/distill")
+def distill_endpoint(
+    agent: str = Query(..., description="Agent ID to scan"),
+    dry_run: bool = Query(False, description="Preview without saving"),
+    days: int = Query(30, description="Scan window in days"),
+):
+    from .distillation import scan_for_patterns, distill_rule, save_rule
+    groups = scan_for_patterns(agent, days=days)
+    if not groups:
+        return {"ok": True, "rules_created": 0, "groups_found": 0, "message": "No patterns found"}
+
+    rules_created = []
+    for group in groups:
+        rule_text = distill_rule(group["bodies"])
+        if not rule_text or len(rule_text) < 10:
+            continue
+        if dry_run:
+            rules_created.append({
+                "rule": rule_text,
+                "source_count": group["count"],
+                "dry_run": True,
+            })
+        else:
+            rule_id = save_rule(agent, rule_text, group["entry_ids"])
+            rules_created.append({
+                "id": rule_id,
+                "rule": rule_text,
+                "source_count": group["count"],
+            })
+
+    return {
+        "ok": True,
+        "rules_created": len(rules_created),
+        "groups_found": len(groups),
+        "rules": rules_created,
+    }

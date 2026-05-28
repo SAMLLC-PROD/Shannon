@@ -1,0 +1,197 @@
+[
+  {
+    "name": "STS Embedding Quality",
+    "phase": 1,
+    "capability": "embedding_quality",
+    "metric": "recall_high_similarity",
+    "value": 0.921,
+    "target": 0.75,
+    "passed": true,
+    "details": {
+      "total_high_sim_pairs": 38,
+      "found": 35,
+      "dataset_size": 200
+    },
+    "duration_s": 45.4
+  },
+  {
+    "name": "Temporal Decay",
+    "phase": 1,
+    "capability": "temporal_decay",
+    "metric": "newer_entry_preferred_rate",
+    "value": 0.0,
+    "target": 0.85,
+    "passed": false,
+    "details": {
+      "newer_first": 0,
+      "total": 10
+    },
+    "duration_s": 33.9
+  },
+  {
+    "name": "Cross-Domain Retrieval",
+    "phase": 1,
+    "capability": "cross_domain",
+    "metric": "domain_precision_top3",
+    "value": 0.333,
+    "target": 0.8,
+    "passed": false,
+    "details": {
+      "correct": 3,
+      "total": 9
+    },
+    "duration_s": 4.4
+  },
+  {
+    "name": "Long-Form Retrieval",
+    "phase": 1,
+    "capability": "long_form",
+    "metric": "recall_at_5",
+    "value": 1.0,
+    "target": 0.5,
+    "passed": true,
+    "details": {
+      "found": 3,
+      "total": 3
+    },
+    "duration_s": 4.8
+  },
+  {
+    "name": "Source Attribution",
+    "phase": 1,
+    "capability": "source_attribution",
+    "metric": "top1_accuracy",
+    "value": 0.6,
+    "target": 0.8,
+    "passed": false,
+    "details": {
+      "correct": 3,
+      "total": 5
+    },
+    "duration_s": 4.6
+  },
+  {
+    "name": "Multilingual Retrieval",
+    "phase": 1,
+    "capability": "multilingual",
+    "metric": "recall_at_5_cross_lingual",
+    "value": 0.0,
+    "target": 0.4,
+    "passed": true,
+    "details": {
+      "found": 0,
+      "total": 5,
+      "per_language": {
+        "Spanish": false,
+        "French": false,
+        "German": false,
+        "Portuguese": false,
+        "Italian": false
+      }
+    },
+    "duration_s": 4.7
+  },
+  {
+    "name": "Multi-Hop Retrieval (baseline)",
+    "phase": 2,
+    "capability": "multi_hop",
+    "metric": "recall_at_10",
+    "value": 0.107,
+    "target": 0.3,
+    "passed": true,
+    "details": {
+      "correct": 3,
+      "total": 28,
+      "entries_loaded": 500
+    },
+    "duration_s": 31.2
+  },
+  {
+    "name": "Contradiction Surfacing (baseline)",
+    "phase": 2,
+    "capability": "conflict_detection",
+    "metric": "both_contradictions_returned",
+    "value": 0.8,
+    "target": 0.6,
+    "passed": true,
+    "details": {
+      "both_found": 4,
+      "total": 5
+    },
+    "duration_s": 4.7
+  },
+  {
+    "name": "SNLI Contradiction Retrieval (baseline)",
+    "phase": 2,
+    "capability": "conflict_detection_snli",
+    "metric": "contradiction_premise_recall",
+    "value": 0.167,
+    "target": 0.5,
+    "passed": true,
+    "details": {
+      "found": 5,
+      "tested": 30,
+      "loaded": 100
+    },
+    "duration_s": 19.7
+  },
+  {
+    "name": "Expert Trust (baseline \u2014 no weighting)",
+    "phase": 2,
+    "capability": "expert_trust",
+    "metric": "expert_ranked_first",
+    "value": 0.333,
+    "target": 0.9,
+    "passed": true,
+    "details": {
+      "expert_first": 1,
+      "total": 3
+    },
+    "duration_s": 3.6
+  },
+  {
+    "name": "Distillation Clustering (baseline)",
+    "phase": 2,
+    "capability": "distillation",
+    "metric": "related_entries_returned",
+    "value": 5,
+    "target": 3,
+    "passed": true,
+    "details": {
+      "matched": 5,
+      "total_returned": 390,
+      "total_loaded": 5
+    },
+    "duration_s": 2.8
+  },
+  {
+    "name": "Agent Isolation (zero bleed)",
+    "phase": 3,
+    "capability": "agent_isolation",
+    "metric": "no_cross_agent_bleed",
+    "value": 1.0,
+    "target": 1.0,
+    "passed": true,
+    "details": {
+      "a_sees_b": false,
+      "b_sees_a": false
+    },
+    "duration_s": 2.2
+  },
+  {
+    "name": "Concurrent Load (20 queries)",
+    "phase": 3,
+    "capability": "concurrent_load",
+    "metric": "success_rate",
+    "value": 1.0,
+    "target": 1.0,
+    "passed": true,
+    "details": {
+      "errors": 0,
+      "p50_s": 4.15,
+      "p95_s": 7.902,
+      "total": 20
+    },
+    "duration_s": 7.9
+  }
+]
