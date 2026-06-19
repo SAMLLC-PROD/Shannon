@@ -6,6 +6,7 @@ Mounts on the main app. New routes:
   POST /tenant/pause
   POST /tenant/wipe
   GET  /tenant/export
+  GET  /tenant/audit
   GET  /source/{entry_id}
 
 The existing /memory endpoints gain optional bearer-token auth:
@@ -37,6 +38,8 @@ from .tenants import (
 )
 from .export import export_tenant_memory
 from .source_viewer import auth_error_page, render_source_page
+from .audit_log import log_auth_event
+from . import audit_log as _audit
 
 log = logging.getLogger(__name__)
 
@@ -256,6 +259,30 @@ def tenant_export(
 
 
 # ---------------------------------------------------------------------------
+# GET /tenant/audit  — CaaS auth event log
+# ---------------------------------------------------------------------------
+
+@router.get("/tenant/audit")
+def tenant_audit(
+    tenant: AuthRequired,
+    limit: int = Query(50, ge=1, le=200, description="Max events to return"),
+):
+    """
+    Return recent CaaS auth events for this tenant, newest first.
+
+    Events: identity_registered, challenge_issued, auth_success,
+            auth_failure, access_disabled, access_enabled.
+    """
+    from .audit_log import get_audit_log
+    entries = get_audit_log(tenant["tenant_id"], limit=limit)
+    return {
+        "tenant_id": tenant["tenant_id"],
+        "count":     len(entries),
+        "entries":   entries,
+    }
+
+
+# ---------------------------------------------------------------------------
 # GET /source/{entry_id}  — HTML source viewer
 # ---------------------------------------------------------------------------
 
@@ -382,6 +409,7 @@ def disable_access(tenant: AuthRequired):
     """Kill switch — immediately revoke all access. Data retained."""
     tid = tenant["tenant_id"]
     disable_token(tid)
+    log_auth_event(_audit.ACCESS_DISABLED, tid, detail="Tenant access disabled via kill switch")
     return {
         "ok": True,
         "tenant_id": tid,
@@ -471,6 +499,13 @@ def register_identity(payload: RegisterIdentityRequest, tenant: AuthRequired):
         wallet_address=payload.wallet_address,
         public_key_bytes=pk_bytes,
     )
+    log_auth_event(
+        _audit.IDENTITY_REGISTERED,
+        tenant["tenant_id"],
+        machine_id=payload.machine_name,
+        nft_token_id=payload.nft_token_id,
+        detail=f"ML-DSA-87 identity registered for NFT #{payload.nft_token_id}",
+    )
     return {
         "ok": True,
         "tenant_id": tenant["tenant_id"],
@@ -513,6 +548,13 @@ def auth_challenge(payload: ChallengeRequest):
         )
 
     challenge = issue_challenge(payload.machine_id)
+    log_auth_event(
+        _audit.CHALLENGE_ISSUED,
+        identity["tenant_id"],
+        machine_id=payload.machine_id,
+        nft_token_id=payload.nft_token_id,
+        detail="Challenge issued (60s TTL)",
+    )
     return {
         "challenge":   challenge,
         "machine_id":  payload.machine_id,
@@ -553,6 +595,15 @@ def auth_verify(payload: VerifyRequest):
     # 1. Check the challenge exists
     live_challenge = peek_challenge(payload.machine_id)
     if not live_challenge:
+        identity = get_machine_identity(payload.nft_token_id)
+        if identity:
+            log_auth_event(
+                _audit.AUTH_FAILURE,
+                identity["tenant_id"],
+                machine_id=payload.machine_id,
+                nft_token_id=payload.nft_token_id,
+                detail="No active challenge — expired or never issued",
+            )
         raise HTTPException(
             status_code=401,
             detail="No active challenge for this machine_id — it may have expired (60s TTL). "
@@ -561,6 +612,15 @@ def auth_verify(payload: VerifyRequest):
 
     # 2. Verify it matches what was issued (prevents substitution attacks)
     if live_challenge != payload.challenge:
+        identity = get_machine_identity(payload.nft_token_id)
+        if identity:
+            log_auth_event(
+                _audit.AUTH_FAILURE,
+                identity["tenant_id"],
+                machine_id=payload.machine_id,
+                nft_token_id=payload.nft_token_id,
+                detail="Challenge mismatch — possible replay or substitution attempt",
+            )
         raise HTTPException(status_code=401, detail="Challenge mismatch.")
 
     # 3. Load public key
@@ -585,6 +645,13 @@ def auth_verify(payload: VerifyRequest):
         )
 
     if not valid:
+        log_auth_event(
+            _audit.AUTH_FAILURE,
+            identity["tenant_id"],
+            machine_id=payload.machine_id,
+            nft_token_id=payload.nft_token_id,
+            detail="ML-DSA-87 signature verification failed",
+        )
         raise HTTPException(status_code=401, detail="Signature verification failed.")
 
     # 5 & 6. Consume challenge (one-time use) and issue session token
@@ -596,6 +663,13 @@ def auth_verify(payload: VerifyRequest):
         nft_token_id=payload.nft_token_id,
     )
 
+    log_auth_event(
+        _audit.AUTH_SUCCESS,
+        identity["tenant_id"],
+        machine_id=payload.machine_id,
+        nft_token_id=payload.nft_token_id,
+        detail=f"Session issued, expires_in={SESSION_TTL_SECONDS}s",
+    )
     return {
         "session_token": session_token,
         "tenant_id":     identity["tenant_id"],
