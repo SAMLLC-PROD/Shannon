@@ -15,7 +15,7 @@ Named for Claude Shannon, father of information theory.
 
 ### What Shannon Is NOT
 
-- **Not a general database.** Don't store raw data dumps, screenshots, keystroke logs, or unprocessed streams. Shannon is for *distilled knowledge* — decisions, milestones, lessons, and context that helps an agent or person understand what happened and why.
+- **Not a raw data dump.** Shannon stores *distilled knowledge*, not unprocessed streams. Raw keystrokes, OCR dumps, and full email threads don't go in directly — but summaries of what they *mean* absolutely do. What counts as "distilled" depends on the agent's role (see Section 4).
 - **Not a vector-only store.** Shannon combines semantic embeddings with recency decay, trust weighting, tier prioritization, and graph traversal. Raw cosine similarity is just one input.
 - **Not a replacement for files.** Code, configs, and structured data belong in git repos and filesystems. Shannon stores the *context around* those things — "why we chose this architecture," "what broke when we tried X," "Ron prefers this approach."
 
@@ -79,50 +79,91 @@ Shannon makes memory **persistent, searchable, and agent-scoped:**
 
 ---
 
-## 4. What to Store (and What NOT to Store)
+## 4. What to Store — Agent Role Determines Data Model
 
-This is the most important section. **Data quality determines retrieval quality.** Garbage in = garbage out, and it's worse than nothing because bad data pollutes good retrievals.
+This is the most important section. **Data quality determines retrieval quality.** But "quality" depends entirely on what the agent's *job* is. A project-engineering agent and a personal-life agent have completely different storage profiles — and the same raw input (keystrokes, screenshots, emails) might be noise for one and gold for the other.
 
-### ✅ SAVE These
+### The Core Rule
 
-| Category | Examples | Why It Matters |
-|----------|----------|---------------|
-| **Decisions** | "Chose FastAPI over Flask because of async support and auto-docs" | Future sessions understand *why* the codebase looks the way it does |
-| **Milestones** | "Deployed 7 validators across 3 continents on 2026-02-24" | Timeline reconstruction, progress tracking |
-| **Lessons Learned** | "ANTHROPIC_BASE_URL in bashrc poisoned all API calls — now use proxy-on/proxy-off" | Prevents repeating mistakes |
-| **Architecture** | "Shannon uses 3-pass retrieval: semantic → keyword → graph" | Any agent can understand system design |
-| **Preferences** | "Ron prefers explanations of WHY, not just the fix" | Consistent interaction style |
-| **Key Relationships** | "Ron's email: spaceautomationmachinesLLC@gmail.com (work)" | Practical operational context |
-| **Project Context** | "Lattice Network = quantum-safe Byzantine consensus for secure AI internet" | Any agent can orient itself |
-| **Error Resolutions** | "VPN split-tunnel issue: NordVPN blocks LAN traffic to 192.168.0.0/24 unless excluded" | Operational troubleshooting knowledge |
-| **Meeting Notes** (summarized) | "2026-06-15 standup: agreed to prioritize Pigeon Mail over Search" | Decision trail |
+**Always pre-process before saving.** Raw data in, garbage retrievals out. But pre-processing means different things for different agents:
 
-### ❌ DO NOT SAVE These
+- A *project agent* distills code decisions, architecture choices, and error resolutions
+- A *personal agent* distills daily activities, relationships, schedules, and life context
+- Both agents **distill** before storing — but they're distilling different source material
 
-| Anti-pattern | Why It's Harmful |
-|-------------|-----------------|
-| **Raw keystroke logs** | Massive volume, zero signal. Drowns meaningful entries in noise. Destroys retrieval precision. |
-| **Unprocessed screenshots** | Shannon stores text, not images. OCR dumps without summarization are noise. |
-| **Every email verbatim** | Save the *decision* or *action item* from an email, not the full thread with signatures and disclaimers. |
-| **Stream-of-consciousness chat** | "ok" "sure" "hmm" "let me think" — these are not memories. |
-| **Duplicate entries** | Shannon has basic dedup, but don't save the same fact 10 times. Check first. |
-| **Highly ephemeral state** | "CPU is at 45% right now" — unless it's diagnostic context for a problem you're solving. |
-| **Secrets / credentials** | API keys, passwords, tokens. Shannon is not a secret store. |
-| **Binary data / base64** | Shannon is text-only. Reference files by path, don't inline them. |
+### Storage Profiles by Agent Role
 
-### The Pre-Processing Rule
+#### 🔧 Project / Engineering Agent (e.g., Guy, Gitflow)
 
-**Before saving anything to Shannon, ask:**
-1. Would a future session benefit from knowing this?
-2. Is this the *distilled insight*, or raw data that needs summarization first?
-3. Does this already exist in Shannon? (Search first.)
-4. Is this a *decision*, *lesson*, *milestone*, or *relationship* — or is it noise?
+This agent builds software, tracks architecture, and manages technical infrastructure.
 
-If you're ingesting external sources (emails, documents, social media), **summarize and extract** before saving:
-- Emails → extract decisions, action items, key facts
-- Documents → extract architecture, key points, relationships
-- Screenshots → describe what's relevant in text
-- Conversations → save the conclusions, not the back-and-forth
+| ✅ Save | Examples |
+|---------|----------|
+| **Technical decisions** | "Chose FastAPI over Flask because of async support and auto-docs" |
+| **Milestones** | "Deployed 7 validators across 3 continents on 2026-02-24" |
+| **Lessons learned** | "ANTHROPIC_BASE_URL in bashrc poisoned all API calls — now use proxy-on/proxy-off" |
+| **Architecture** | "Shannon uses 3-pass retrieval: semantic → keyword → graph" |
+| **Error resolutions** | "VPN split-tunnel issue: NordVPN blocks LAN traffic unless split-tunnel excludes 192.168.0.0/24" |
+| **Project context** | "Lattice Network = quantum-safe Byzantine consensus for secure AI internet" |
+
+| ❌ Don't Save | Why |
+|-------------|-----|
+| Raw code diffs | That's what git is for |
+| Build logs verbatim | Ephemeral — save the *fix*, not the error stream |
+| Every conversation turn | Save conclusions and decisions, not the back-and-forth |
+
+#### 🏠 Personal Agent (e.g., Hermes)
+
+This agent manages daily life, personal context, and human relationships. **Its source material is fundamentally different** — and what's "noise" for a project agent may be valuable personal context.
+
+| ✅ Save | Examples | Pre-Processing |
+|---------|----------|----------------|
+| **Activity patterns** | "Ron worked in Excel on the RMA spreadsheet for 3 hours" | Keystroke/app usage → summarize into activity blocks, don't store raw keystrokes |
+| **People & relationships** | "Sarah = Ron's wife. Kids: [names]. School pickup at 3:15 PM" | Contacts/conversations → extract relationships, preferences, schedules |
+| **Life logistics** | "Early dismissal Thursday, dentist appointment June 25 at 2pm" | Emails/calendar → extract dates, actions, obligations |
+| **Receipts & purchases** | "Bought Samsung 860 QVO 1TB from Amazon, $89, for backup drive" | Screenshots/emails → extract what, when, how much |
+| **Preferences & habits** | "Ron drinks coffee black. Prefers window seat. Hates phone calls." | Observed patterns → distilled preferences |
+| **Device & environment state** | "Windows PC: C: drive at 31GB free, backup to D: started 2026-06-18" | System snapshots → save when state matters (pre-migration, pre-wipe, diagnostics) |
+| **Photo/screenshot context** | "Screenshot of kids' school calendar for fall semester" | OCR/description → save the *meaning*, reference the file by path |
+| **Health & wellbeing** | "Ron mentioned back pain from the desk setup" | Conversations → extract health-relevant observations |
+| **Emotional context** | "Frustrated with the Proxmox NIC issue, stayed up until 2am" | Situational awareness → helps agent calibrate tone and timing |
+
+| ❌ Don't Save | Why |
+|-------------|-----|
+| **Raw keystroke streams** | "a-s-d-f-space-t-h-e" is noise. "Spent 2 hours writing the patent draft" is signal. Summarize app-usage into activity blocks. |
+| **Unprocessed OCR dumps** | A wall of OCR text with layout artifacts is unsearchable. Describe what the screenshot *means*. |
+| **Every email verbatim** | Save the action item or key fact: "School: early dismissal Thursday." Not the full thread with disclaimers and reply chains. |
+| **Idle/sleep/lock events** | "Screen locked at 3:47pm" is not a memory. "Ron was away from 3-5pm (school pickup)" is. |
+| **Stream-of-consciousness chat** | "ok" "sure" "hmm" — these aren't memories for anyone. |
+
+#### Universal Don'ts (All Agents)
+
+| ❌ Never Save | Why |
+|-------------|-----|
+| **Secrets / credentials** | API keys, passwords, tokens — Shannon is not a secret store |
+| **Binary data / base64** | Shannon is text-only. Reference files by path, don't inline them |
+| **Duplicate entries** | Search before saving. Don't store the same fact 10 times |
+
+### The Pre-Processing Rule (Universal)
+
+Regardless of agent role, **always distill before storing:**
+
+1. **Would a future session benefit from knowing this?**
+2. **Is this the distilled insight, or raw data that needs summarization?**
+3. **Does this already exist in Shannon?** (Search first.)
+4. **What kind of memory is this?** Tag it properly for tier assignment.
+
+**Source → Distillation → Entry:**
+
+| Source | Raw Data (don't save) | Distilled Entry (save this) |
+|--------|----------------------|----------------------------|
+| Keystrokes / app focus | `keypress: a, keypress: b...` | "Spent 3 hours in Excel on RMA analysis, 45 min in Teams calls" |
+| Email inbox | Full email thread with signatures | "Email from school: early dismissal Thursday. Action: pick up kids at 1pm" |
+| Screenshot | Raw OCR text dump | "Receipt: Amazon order #123, Samsung 860 QVO 1TB, $89, arriving June 20" |
+| Browsing history | 47 URLs visited | "Researched Proxmox GPU passthrough options. Best guide: [url]. Decision: use vfio-pci" |
+| Conversations | Full chat transcript | "Agreed with Sarah to book the cabin for July 4th weekend. Budget: $400" |
+| System state | CPU 45%, RAM 62%, uptime 3d | "C: drive critically low (31GB free) — started backup to D: before any changes" |
+| Social media | Raw notification stream | "Twitter DM from @lattice_dev about API partnership — needs response by Friday" |
 
 ---
 
@@ -598,7 +639,7 @@ Use these tags consistently for proper tier assignment and retrieval quality:
 | Mistake | Consequence | Fix |
 |---------|------------|-----|
 | Saving raw email threads | Retrieval polluted with signatures, disclaimers, quoted replies | Summarize → extract decisions/actions → save summary |
-| Saving keystroke logs | Massive noise, buries real entries | Never. Not even summarized. |
+| Saving raw keystroke/event streams | Massive noise, buries real entries | Distill into activity summaries: "3 hours in Excel on RMA" not "keypress: a, b, c..." |
 | No tags on entries | All entries default to Tier 2, no trust weighting | Always include at least agent tag + 1-2 descriptive tags |
 | Duplicate saves | Same fact appears multiple times, wastes token budget on retrieval | Search before saving; if updating, use "supersedes" language |
 | Saving ephemeral state | "It's 3pm" or "CPU at 45%" clutter the index | Only save if it's diagnostic context for a problem resolution |
