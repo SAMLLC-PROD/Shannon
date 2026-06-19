@@ -60,14 +60,38 @@ async def _get_tenant(authorization: Annotated[Optional[str], Header()] = None) 
         raise HTTPException(status_code=401, detail="Authorization must be Bearer token")
 
     token = authorization.removeprefix("Bearer ").strip()
-    
-    # Try profile-scoped token first
+
+    # 1. Try JWT session token (challenge-response auth — Phase 4+)
+    from .jwt_tokens import decode_session_jwt
+    jwt_payload = decode_session_jwt(token)
+    if jwt_payload is not None:
+        session = authenticate_session(token)
+        if not session:
+            raise HTTPException(status_code=401, detail="Session token expired or revoked.")
+        from .store import _connect as _sc
+        conn = _sc()
+        row = conn.execute(
+            "SELECT * FROM tenants WHERE tenant_id = ?",
+            (jwt_payload["tenant_id"],),
+        ).fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=401, detail="Tenant not found.")
+        tenant_row = dict(row)
+        if tenant_row["status"] in ("paused", "wiped", "disabled"):
+            raise HTTPException(status_code=403, detail="Tenant account is not active.")
+        tenant_row["scope"]      = "session"
+        tenant_row["agent_id"]   = jwt_payload.get("agent_id")
+        tenant_row["machine_id"] = jwt_payload.get("machine_id")
+        return tenant_row
+
+    # 2. Try profile-scoped token
     from .tenants import authenticate_profile
     profile_auth = authenticate_profile(token)
     if profile_auth:
         return profile_auth  # has scope="profile", profile_id set
-    
-    # Fall back to tenant-wide token
+
+    # 3. Fall back to static tenant-wide Bearer token
     tenant = authenticate(token)
 
     if tenant is None:

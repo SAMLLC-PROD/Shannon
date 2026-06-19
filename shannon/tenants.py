@@ -549,13 +549,29 @@ def update_identity_last_auth(tenant_id: str, nft_token_id: int) -> None:
     conn.close()
 
 
-SESSION_TTL_SECONDS = 3600  # 1 hour
+SESSION_TTL_SECONDS = 3600  # 1 hour (exported so caas_api can report it)
 
 
 def create_session(tenant_id: str, machine_id: str, nft_token_id: int) -> str:
-    """Issue an opaque session token valid for SESSION_TTL_SECONDS seconds."""
+    """
+    Issue a signed JWT session token (HS256, 1-hour TTL).
+
+    The JWT is also recorded in the sessions table for audit / revocation.
+    """
+    from .jwt_tokens import create_session_jwt
     init_identity_schema()
-    token = secrets.token_urlsafe(32)
+
+    # Resolve agent_id from stored machine name (identity row)
+    identity = get_machine_identity(nft_token_id)
+    agent_id  = identity["machine_name"] if identity else machine_id
+
+    token = create_session_jwt(
+        tenant_id=tenant_id,
+        machine_id=machine_id,
+        nft_token_id=nft_token_id,
+        agent_id=agent_id,
+        expires_in=SESSION_TTL_SECONDS,
+    )
     expires_at = (
         datetime.now(timezone.utc) + timedelta(seconds=SESSION_TTL_SECONDS)
     ).isoformat()
@@ -571,19 +587,36 @@ def create_session(tenant_id: str, machine_id: str, nft_token_id: int) -> str:
 
 
 def authenticate_session(token: str) -> Optional[dict]:
-    """Validate a session token. Returns session dict or None if missing/expired."""
+    """
+    Validate a session token.
+
+    Tries JWT validation first (fast, no DB hit).
+    Also checks the sessions table to support future revocation.
+    Returns a session-like dict or None if invalid/expired/revoked.
+    """
+    from .jwt_tokens import decode_session_jwt
+    payload = decode_session_jwt(token)
+    if not payload:
+        return None
+
+    # Revocation check — if the JWT was explicitly invalidated it won't be in sessions
     init_identity_schema()
     conn = _connect()
     row = conn.execute(
-        "SELECT * FROM sessions WHERE session_token = ?", (token,)
+        "SELECT expires_at FROM sessions WHERE session_token = ?", (token,)
     ).fetchone()
     conn.close()
     if not row:
-        return None
-    session = dict(row)
-    if datetime.now(timezone.utc) > _parse_dt(session["expires_at"]):
-        return None
-    return session
+        return None  # was revoked or never issued by this server
+
+    return {
+        "session_token": token,
+        "tenant_id":     payload["tenant_id"],
+        "machine_id":    payload["machine_id"],
+        "nft_token_id":  payload["nft_token_id"],
+        "agent_id":      payload.get("agent_id"),
+        "expires_at":    row["expires_at"],
+    }
 
 
 def cleanup_expired_sessions() -> int:
