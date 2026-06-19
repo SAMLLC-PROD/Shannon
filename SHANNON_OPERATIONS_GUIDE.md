@@ -1,38 +1,48 @@
 # Shannon Memory Service — Operations Guide
 
-**Version:** 1.0
+**Version:** 2.0
 **Date:** 2026-06-18
 **Authors:** Ron Peterson & Guy Shannon
-**Audience:** Agents (Hermes, Guy, Gitflow, etc.), Humans, and Integrators
+**Audience:** Everyone — CaaS users, agents, integrators, and humans
 
 ---
 
 ## 1. What Shannon Is
 
-Shannon is a **persistent long-term memory service** for AI agents and humans. It solves one problem: **AI agents forget everything when a session ends.** Shannon writes memories to disk, embeds them for semantic search, and retrieves them based on meaning and recency — so every new session can start with relevant context from every previous session.
+Shannon is a **persistent long-term memory service** for AI agents, applications, and humans. It solves one problem: **context is lost when sessions end.** Shannon writes memories to disk, embeds them for semantic search, and retrieves them based on meaning and recency — so every new session can start with relevant context from every previous one.
 
 Named for Claude Shannon, father of information theory.
 
+**Shannon works for anyone who needs to remember things across sessions:**
+
+| Use Case | Who | What Gets Stored |
+|----------|-----|-----------------|
+| **Project engineering** | AI coding agents, dev teams | Architecture decisions, error resolutions, milestones, lessons learned |
+| **Personal assistant** | Life-management agents, personal AI | Daily activities, relationships, preferences, schedules, life logistics |
+| **Knowledge management** | Researchers, mechanics, specialists | Domain expertise, procedures, supplier info, part numbers, reference material |
+| **Team context** | Collaborative agents, workgroups | Shared decisions, meeting outcomes, project status, handoff notes |
+
 ### What Shannon Is NOT
 
-- **Not a raw data dump.** Shannon stores *distilled knowledge*, not unprocessed streams. Raw keystrokes, OCR dumps, and full email threads don't go in directly — but summaries of what they *mean* absolutely do. What counts as "distilled" depends on the agent's role (see Section 4).
+- **Not a raw data dump.** Shannon stores *distilled knowledge*, not unprocessed streams. Raw keystrokes, OCR dumps, and full email threads don't go in directly — but summaries of what they *mean* absolutely do. What counts as "distilled" depends on your use case (see Section 4).
 - **Not a vector-only store.** Shannon combines semantic embeddings with recency decay, trust weighting, tier prioritization, and graph traversal. Raw cosine similarity is just one input.
-- **Not a replacement for files.** Code, configs, and structured data belong in git repos and filesystems. Shannon stores the *context around* those things — "why we chose this architecture," "what broke when we tried X," "Ron prefers this approach."
+- **Not a replacement for files.** Code, configs, and structured data belong in git repos and filesystems. Shannon stores the *context around* those things — "why we chose this architecture," "what broke when we tried X," "the customer prefers this approach."
 
 ---
 
 ## 2. The Problem Shannon Solves
 
-Every AI conversation ends the same way: the context window fills, compression happens, and details disappear. The richer the session, the more painful the loss.
+Every AI conversation ends the same way: the context window fills, compression happens, and details disappear. The richer the session, the more painful the loss. Humans have the same problem — tribal knowledge walks out the door when someone leaves.
 
-Shannon makes memory **persistent, searchable, and agent-scoped:**
+Shannon makes memory **persistent, searchable, and scoped:**
 
 | Without Shannon | With Shannon |
 |----------------|-------------|
 | Agent forgets everything each session | Agent loads relevant context from all prior sessions |
 | User repeats themselves constantly | Key decisions and preferences are recalled automatically |
-| No institutional memory across agents | Multiple agents share a memory backbone (isolated by agent ID) |
-| Context window is the only memory | 21K+ entries, semantically indexed, infinitely expandable |
+| No institutional memory across agents | Multiple agents share a memory backbone (isolated by identity) |
+| Context window is the only memory | Semantically indexed, infinitely expandable memory |
+| Knowledge trapped in one person's head | Distilled expertise retrievable by anyone with access |
 
 ---
 
@@ -40,32 +50,39 @@ Shannon makes memory **persistent, searchable, and agent-scoped:**
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Agent / Client                                             │
-│  (Guy, Hermes, Gitflow, any MCP/HTTP client)                │
+│  Client (Agent, App, Human, MCP-compatible tool)            │
 │                                                             │
-│  MCP (stdio)  ──or──  HTTP REST                             │
-└──────┬──────────────────────┬───────────────────────────────┘
-       │                      │
-       ▼                      ▼
+│  MCP (stdio)  ──or──  HTTP REST  ──or──  Bearer Token       │
+└──────┬──────────────────────┬──────────────────┬────────────┘
+       │                      │                  │
+       ▼                      ▼                  ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Shannon Memory Service  (FastAPI, port 8765)               │
 │                                                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
 │  │  REST API    │  │  Retrieval   │  │  Embeddings      │   │
 │  │  (api.py)    │  │  Engine      │  │  (mxbai-embed)   │   │
-│  │              │  │  3-pass:     │  │  via Ollama      │   │
-│  │  /health     │  │  semantic +  │  │  1024-dim        │   │
+│  │              │  │  3-pass:     │  │  1024-dim        │   │
+│  │  /health     │  │  semantic +  │  │  via Ollama      │   │
 │  │  /memory     │  │  keyword +   │  │                  │   │
 │  │  /agents     │  │  graph       │  │                  │   │
 │  │  /rules      │  │              │  │                  │   │
 │  │  /distill    │  │              │  │                  │   │
+│  │  /tenant/*   │  │              │  │                  │   │
 │  └──────────────┘  └──────────────┘  └──────────────────┘   │
 │                                                             │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  Storage Layer                                       │   │
-│  │  SQLite: index.db (entries, agents, sessions)        │   │
+│  │  SQLite: index.db (entries, agents, tenants, profiles│   │
 │  │  SQLite: embeddings.db (vectors, 1024-dim)           │   │
 │  │  Filesystem: chunks/ (raw text, Zeckendorf-addressed)│   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  Tenant Isolation                                    │   │
+│  │  Bearer tokens → tenant-scoped data                  │   │
+│  │  Profile tokens → profile-scoped within tenant       │   │
+│  │  Agent tags → agent-scoped (internal use)            │   │
 │  └──────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -75,27 +92,28 @@ Shannon makes memory **persistent, searchable, and agent-scoped:**
 - **Zeckendorf-Fibonacci Addressing:** Every entry gets a unique address derived from its content hash via Zeckendorf's theorem (unique sum of non-consecutive Fibonacci numbers). Deterministic, collision-free by mathematical proof.
 - **QAM Constellation Encoding:** Visual dot patterns for each entry, inspired by RF QAM modulation. Makes the dictionary human-inspectable.
 - **Layered Growth:** Layer 1 provides 2^100 positions. Additional layers compound the address space without re-indexing existing entries.
-- **Embedding Model:** `mxbai-embed-large` (1024 dimensions) via local Ollama.
+- **Embedding Model:** `mxbai-embed-large` (1024 dimensions) via Ollama.
 
 ---
 
-## 4. What to Store — Agent Role Determines Data Model
+## 4. What to Store — Your Role Determines Your Data Model
 
-This is the most important section. **Data quality determines retrieval quality.** But "quality" depends entirely on what the agent's *job* is. A project-engineering agent and a personal-life agent have completely different storage profiles — and the same raw input (keystrokes, screenshots, emails) might be noise for one and gold for the other.
+This is the most important section. **Data quality determines retrieval quality.** But "quality" depends entirely on what you're *using Shannon for*. A project-engineering agent and a personal-life agent have completely different storage profiles — and the same raw input (keystrokes, screenshots, emails) might be noise for one and gold for the other.
 
 ### The Core Rule
 
-**Always pre-process before saving.** Raw data in, garbage retrievals out. But pre-processing means different things for different agents:
+**Always pre-process before saving.** Raw data in, garbage retrievals out. But pre-processing means different things for different use cases:
 
 - A *project agent* distills code decisions, architecture choices, and error resolutions
 - A *personal agent* distills daily activities, relationships, schedules, and life context
-- Both agents **distill** before storing — but they're distilling different source material
+- A *domain specialist* distills procedures, part numbers, supplier relationships, and field experience
+- All users **distill** before storing — but they're distilling different source material
 
-### Storage Profiles by Agent Role
+### Storage Profiles by Use Case
 
-#### 🔧 Project / Engineering Agent (e.g., Guy, Gitflow)
+#### 🔧 Project / Engineering
 
-This agent builds software, tracks architecture, and manages technical infrastructure.
+Building software, tracking architecture, managing technical infrastructure.
 
 | ✅ Save | Examples |
 |---------|----------|
@@ -112,41 +130,60 @@ This agent builds software, tracks architecture, and manages technical infrastru
 | Build logs verbatim | Ephemeral — save the *fix*, not the error stream |
 | Every conversation turn | Save conclusions and decisions, not the back-and-forth |
 
-#### 🏠 Personal Agent (e.g., Hermes)
+#### 🏠 Personal Assistant
 
-This agent manages daily life, personal context, and human relationships. **Its source material is fundamentally different** — and what's "noise" for a project agent may be valuable personal context.
+Managing daily life, personal context, human relationships.
 
 | ✅ Save | Examples | Pre-Processing |
 |---------|----------|----------------|
 | **Activity patterns** | "Ron worked in Excel on the RMA spreadsheet for 3 hours" | Keystroke/app usage → summarize into activity blocks, don't store raw keystrokes |
-| **People & relationships** | "Sarah = Ron's wife. Kids: [names]. School pickup at 3:15 PM" | Contacts/conversations → extract relationships, preferences, schedules |
+| **People & relationships** | "Sarah = wife. Kids: [names]. School pickup at 3:15 PM" | Contacts/conversations → extract relationships, preferences, schedules |
 | **Life logistics** | "Early dismissal Thursday, dentist appointment June 25 at 2pm" | Emails/calendar → extract dates, actions, obligations |
 | **Receipts & purchases** | "Bought Samsung 860 QVO 1TB from Amazon, $89, for backup drive" | Screenshots/emails → extract what, when, how much |
-| **Preferences & habits** | "Ron drinks coffee black. Prefers window seat. Hates phone calls." | Observed patterns → distilled preferences |
+| **Preferences & habits** | "Drinks coffee black. Prefers window seat. Hates phone calls." | Observed patterns → distilled preferences |
 | **Device & environment state** | "Windows PC: C: drive at 31GB free, backup to D: started 2026-06-18" | System snapshots → save when state matters (pre-migration, pre-wipe, diagnostics) |
 | **Photo/screenshot context** | "Screenshot of kids' school calendar for fall semester" | OCR/description → save the *meaning*, reference the file by path |
-| **Health & wellbeing** | "Ron mentioned back pain from the desk setup" | Conversations → extract health-relevant observations |
-| **Emotional context** | "Frustrated with the Proxmox NIC issue, stayed up until 2am" | Situational awareness → helps agent calibrate tone and timing |
+| **Health & wellbeing** | "Mentioned back pain from the desk setup" | Conversations → extract health-relevant observations |
+| **Emotional context** | "Frustrated with the Proxmox NIC issue, stayed up until 2am" | Situational awareness → helps calibrate tone and timing |
 
 | ❌ Don't Save | Why |
 |-------------|-----|
-| **Raw keystroke streams** | "a-s-d-f-space-t-h-e" is noise. "Spent 2 hours writing the patent draft" is signal. Summarize app-usage into activity blocks. |
+| **Raw keystroke streams** | "a-s-d-f-space-t-h-e" is noise. "Spent 2 hours writing the patent draft" is signal. |
 | **Unprocessed OCR dumps** | A wall of OCR text with layout artifacts is unsearchable. Describe what the screenshot *means*. |
-| **Every email verbatim** | Save the action item or key fact: "School: early dismissal Thursday." Not the full thread with disclaimers and reply chains. |
-| **Idle/sleep/lock events** | "Screen locked at 3:47pm" is not a memory. "Ron was away from 3-5pm (school pickup)" is. |
-| **Stream-of-consciousness chat** | "ok" "sure" "hmm" — these aren't memories for anyone. |
+| **Every email verbatim** | Save the action item: "School: early dismissal Thursday." Not the full thread. |
+| **Idle/sleep/lock events** | "Screen locked at 3:47pm" is not a memory. "Away from 3-5pm (school pickup)" is. |
 
-#### Universal Don'ts (All Agents)
+#### 🔩 Domain Specialist (Mechanic, Researcher, Tradesperson)
+
+Capturing hard-won expertise, procedures, supplier relationships, field knowledge.
+
+| ✅ Save | Examples | Pre-Processing |
+|---------|----------|----------------|
+| **Procedures** | "LS3 cam swap: pull radiator first, use 3-jaw puller for balancer, torque to 22 ft-lb" | Field experience → step-by-step distilled procedures |
+| **Part cross-references** | "GM 12346789 = LS3 cam sensor, also fits LS2 (09-13). Summit has best price." | Supplier catalogs/lookup → distilled cross-ref entries |
+| **Failure modes** | "If LS7 drops cylinder 4, check lifter bore wear first — known issue on pre-2010 blocks" | Diagnostic experience → cause/effect pairs |
+| **Supplier relationships** | "Joe at Pacific Performance: fast turnaround, ships same-day if ordered before 2pm PT" | Interactions → distilled contact + behavior notes |
+| **Tool notes** | "Snap-on EECS750 catches intermittent misfires that cheaper scanners miss" | Equipment experience → capability notes |
+| **Regulatory/spec data** | "EPA allowance for catalyst monitor: 2 trips, 40-65 mph, steady state 3 min" | Manuals/regulations → extracted key parameters |
+
+| ❌ Don't Save | Why |
+|-------------|-----|
+| Full service manuals | Reference by part number/page — Shannon is for the *context* around specs, not the specs themselves |
+| Every diagnostic code dump | Save the *diagnosis*: "P0300 + P0171 together = intake manifold gasket on this engine" |
+| Raw sensor data streams | Save the conclusion: "MAF reads 15g/s at idle, should be 5-7 — sensor is bad" |
+
+#### Universal Don'ts (All Users)
 
 | ❌ Never Save | Why |
 |-------------|-----|
 | **Secrets / credentials** | API keys, passwords, tokens — Shannon is not a secret store |
-| **Binary data / base64** | Shannon is text-only. Reference files by path, don't inline them |
+| **Binary data / base64** | Shannon is text-only. Reference files by path/URL, don't inline them |
 | **Duplicate entries** | Search before saving. Don't store the same fact 10 times |
+| **Stream-of-consciousness** | "ok" "sure" "hmm" — these aren't memories for anyone |
 
 ### The Pre-Processing Rule (Universal)
 
-Regardless of agent role, **always distill before storing:**
+Regardless of use case, **always distill before storing:**
 
 1. **Would a future session benefit from knowing this?**
 2. **Is this the distilled insight, or raw data that needs summarization?**
@@ -160,16 +197,29 @@ Regardless of agent role, **always distill before storing:**
 | Keystrokes / app focus | `keypress: a, keypress: b...` | "Spent 3 hours in Excel on RMA analysis, 45 min in Teams calls" |
 | Email inbox | Full email thread with signatures | "Email from school: early dismissal Thursday. Action: pick up kids at 1pm" |
 | Screenshot | Raw OCR text dump | "Receipt: Amazon order #123, Samsung 860 QVO 1TB, $89, arriving June 20" |
-| Browsing history | 47 URLs visited | "Researched Proxmox GPU passthrough options. Best guide: [url]. Decision: use vfio-pci" |
+| Browsing history | 47 URLs visited | "Researched Proxmox GPU passthrough. Best guide: [url]. Decision: use vfio-pci" |
 | Conversations | Full chat transcript | "Agreed with Sarah to book the cabin for July 4th weekend. Budget: $400" |
 | System state | CPU 45%, RAM 62%, uptime 3d | "C: drive critically low (31GB free) — started backup to D: before any changes" |
 | Social media | Raw notification stream | "Twitter DM from @lattice_dev about API partnership — needs response by Friday" |
+| Diagnostic scan | 47 PIDs dumped | "P0300 + P0171 together on 5.3L = intake manifold gasket (2 of 3 confirmed)" |
+| Sensor readings | 2000 data points | "MAF reads 15g/s at idle, should be 5-7. Sensor confirmed bad. Replaced." |
 
 ---
 
 ## 5. API Reference
 
-**Base URL:** `http://localhost:8765` (local) or `http://192.168.0.68:8765` (LAN)
+**Base URL:** Your Shannon instance (e.g., `http://localhost:8765` or `https://shannon.example.com`)
+
+### Authentication
+
+Shannon supports two authentication paths:
+
+| Method | When to Use | How |
+|--------|-------------|-----|
+| **Agent parameter** | Internal agents on the same network | `?agent=myagent` query parameter |
+| **Bearer token** | CaaS tenants, external integrations | `Authorization: Bearer <your-token>` header |
+
+CaaS users receive a token at registration. Use it on every request. Token-authenticated requests are completely isolated from other tenants.
 
 ### 5.1 Health Check
 
@@ -186,22 +236,23 @@ Response:
 }
 ```
 
-### 5.2 Semantic Retrieve — Load Context
+### 5.2 Semantic Retrieve — Load Context (Primary Endpoint)
 
 The **primary retrieval endpoint.** Returns entries ranked by a composite score: semantic similarity × tier weight × recency decay × trust.
 
 ```
-GET /memory?agent={agent}&topic={topic}&limit_tokens={limit}&recency={window}
+GET /memory?topic={topic}&limit_tokens={limit}&recency={window}
+
+Headers (CaaS):  Authorization: Bearer <token>
+Query (internal): &agent={agent_id}
 
 Parameters:
-  agent        (required)  Agent ID — scopes retrieval to entries tagged with this agent
   topic        (required)  Natural language topic (embedded for semantic search)
   limit_tokens (optional)  Token budget for response (default: 4000)
   recency      (optional)  Time window: "hot" / "warm" / "cold" / "all" (default: "all")
 
 Response:
 {
-  "agent": "hermes",
   "topic": "...",
   "entries": [
     {
@@ -233,7 +284,7 @@ score = tier_weight × (0.50 × semantic + 0.25 × recency + 0.25 × trust)
 | 2 (Silver) | 1.0× | Default for most entries |
 | 3 (Bronze) | 0.5× | youtube, transcript, raw-note |
 
-**Recency decay:** 7-day half-life (entries lose relevance over time unless they score high on semantics/trust).
+**Recency decay:** 7-day half-life. Entries lose relevance over time unless they score high on semantics/trust.
 
 **Three-pass retrieval:**
 1. **Semantic search** — cosine similarity of embeddings + trust + recency
@@ -245,12 +296,10 @@ Results are merged, deduplicated, and re-ranked.
 ### 5.3 Keyword Search
 
 ```
-GET /memory/search?q={query}&agent={agent}&limit={limit}
+GET /memory/search?q={query}&limit={limit}
 
-Parameters:
-  q      (required)  Search query
-  agent  (optional)  Filter to specific agent
-  limit  (optional)  Max results (default 10, max 50)
+Headers (CaaS):  Authorization: Bearer <token>
+Query (internal): &agent={agent_id}
 
 Response:
 {
@@ -260,19 +309,19 @@ Response:
 }
 ```
 
-Uses semantic search with tier-weighted scoring when embeddings are available; falls back to keyword matching.
-
 ### 5.4 Save Memory
 
 ```
 POST /memory
 Content-Type: application/json
+Authorization: Bearer <token>    ← CaaS users
+                                  ← Internal: use "agent" field instead
 
 {
   "body": "Descriptive text about what happened and why it matters.",
-  "agent": "hermes",
+  "agent": "myagent",            ← internal only (CaaS uses Bearer token)
   "tags": ["decision", "architecture"],
-  "session_id": "hermes-2026-06-18",
+  "session_id": "session-2026-06-18",
   "tier": 2
 }
 
@@ -280,38 +329,21 @@ Response: {"id": "sha256-hex", "ok": true}
 ```
 
 **Auto-tier:** If `tier` is omitted or set to 2, Shannon inspects tags and auto-assigns:
-- Tags containing `skill`, `decision`, `architecture`, `milestone`, `lesson-learned` → **Tier 1** (boosted in retrieval)
+- Tags containing `skill`, `decision`, `architecture`, `milestone`, `lesson-learned` → **Tier 1** (boosted)
 - Tags containing `youtube`, `transcript`, `raw-note` → **Tier 3** (deprioritized)
 - Everything else → **Tier 2** (standard)
 
-**Agent isolation:** The `agent` field is appended to tags automatically. Entries are scoped to their agent — Hermes cannot read Guy's entries via the agent API path.
-
 **Automatic embedding:** Every saved entry is embedded in the background immediately after write.
 
-### 5.5 List Agents
+### 5.5 List Agents (Internal)
 
 ```
 GET /agents
 
-Response:
-{
-  "agents": [
-    {"agent_id": "guy", "display_name": "guy", "entry_count": 14979, ...},
-    {"agent_id": "hermes", "display_name": "hermes", "entry_count": 8, ...}
-  ]
-}
+Response: {"agents": [{"agent_id": "guy", "entry_count": 14979, ...}]}
 ```
 
-### 5.6 Register Agent
-
-```
-POST /agents
-Content-Type: application/json
-
-{"agent_id": "hermes", "display_name": "Hermes", "tag_profile": ["backup", "personal"]}
-```
-
-### 5.7 Regenerate Context File
+### 5.6 Regenerate Context File (Internal)
 
 ```
 POST /context/regenerate
@@ -319,44 +351,35 @@ POST /context/regenerate
 Response: {"ok": true, "path": "...", "elapsed_seconds": 1.23}
 ```
 
-Rewrites `memory/shannon-context.md` from recent entries using time-tiered compression. Useful as a flat-file fallback when Shannon is down.
-
-### 5.8 Embedding Operations
+### 5.7 Embedding Operations (Internal)
 
 ```
-POST /embeddings/backfill    → Embed all un-embedded entries (background task)
-GET  /embeddings/stats       → {"total_entries": 21514, "embedded": 21353, "coverage": 99.3, "model": "mxbai-embed-large", "dimensions": 1024}
+POST /embeddings/backfill    → Embed all un-embedded entries (background)
+GET  /embeddings/stats       → Coverage, model, dimension count
 ```
 
-### 5.9 Distillation (Pattern Detection)
+### 5.8 Distillation — Pattern Detection
 
-Shannon can scan an agent's entries for repeated patterns and distill them into rules:
+Shannon can scan entries for repeated patterns and distill them into rules:
 
 ```
-POST /distill?agent=hermes&days=30&dry_run=true
+POST /distill?agent=myagent&days=30&dry_run=true
 
 Response:
 {
   "ok": true,
   "rules_created": 3,
   "groups_found": 5,
-  "rules": [
-    {"rule": "Distilled pattern text...", "source_count": 4, "dry_run": true}
-  ]
+  "rules": [{"rule": "Distilled pattern...", "source_count": 4}]
 }
 ```
 
 ```
-GET  /rules?agent=hermes       → List distilled rules
+GET    /rules?agent=myagent    → List distilled rules
 DELETE /rules/{entry_id}       → Remove a rule
 ```
 
-**Trust tags for rules:**
-- `verified`, `causal-knowledge`, `distilled-rule` → **trust weight 1.0** (always surfaced)
-- `spurious-correlation`, `no-causation` → **trust weight 0.1** (suppressed)
-- Default → **trust weight 0.5**
-
-### 5.10 Tier Backfill
+### 5.9 Tier Backfill (Internal)
 
 ```
 POST /memory/backfill-tiers    → Re-assign tiers to all entries based on tags
@@ -364,7 +387,96 @@ POST /memory/backfill-tiers    → Re-assign tiers to all entries based on tags
 
 ---
 
-## 6. MCP Integration
+## 6. CaaS Tenant API
+
+These endpoints are for **Shannon-as-a-Service users** who authenticate with Bearer tokens.
+
+### 6.1 Registration
+
+```
+POST /tenant/register
+Content-Type: application/json
+
+{"email": "you@example.com", "display_name": "Your Name"}
+
+Response:
+{
+  "tenant_id": "uuid",
+  "auth_token": "your-secret-token",
+  "message": "Store your auth_token securely — it won't be shown again.",
+  "trial_days": 14,
+  "note": "No auto-charge. You'll be paused (not deleted) after 14 days."
+}
+```
+
+**⚠️ Save your auth_token immediately — it is shown exactly once.**
+
+### 6.2 Account Status
+
+```
+GET /tenant/status
+Authorization: Bearer <token>
+
+Response:
+{
+  "tenant_id": "uuid",
+  "status": "active",
+  "trial_days_remaining": 12,
+  "entry_count": 47,
+  "storage_mb": 0.234
+}
+```
+
+### 6.3 Knowledge Profiles
+
+Profiles let you organize memories into namespaces. A mechanic might have "LS3 Turbo Builds", "K-Series NA", and "Diagnostic Patterns" as separate profiles. Each profile can have its own access token for sharing.
+
+```
+POST /tenant/profiles                     → Create profile
+GET  /tenant/profiles                     → List profiles with entry counts
+DELETE /tenant/profiles/{id}              → Delete profile + all its entries
+POST /tenant/profiles/{id}/token          → Generate profile-scoped access token
+```
+
+**Profile-scoped tokens** are powerful: give someone a token for one profile and they can *only* see that profile's data. Nothing else is visible. Cryptographic data separation.
+
+### 6.4 Export
+
+```
+GET /tenant/export?topic=TOPIC&limit_tokens=8000&format=markdown
+Authorization: Bearer <token>
+
+Response: markdown document (designed to paste into ChatGPT / Claude / Gemini)
+```
+
+### 6.5 Source Viewer
+
+```
+GET /source/{entry_id}?token=<your-token>
+
+Response: HTML page showing the source material for a specific memory entry
+```
+
+### 6.6 Account Management
+
+```
+POST /tenant/pause                        → Pause account (data retained 30 days)
+POST /tenant/wipe {"confirm": true}       → Permanently delete all data
+POST /tenant/disable                      → Kill switch — revoke access immediately
+POST /tenant/resolve-conflict             → Resolve conflicting entries
+```
+
+### 6.7 Trial Lifecycle
+
+| Phase | Duration | What Happens |
+|-------|----------|-------------|
+| **Active trial** | 14 days | Full access. No auto-charge ever. |
+| **Paused** | 30-day grace | Data retained. API returns 403. Contact us to resume. |
+| **Wiped** | After grace | All data permanently deleted. |
+
+---
+
+## 7. MCP Integration
 
 Shannon exposes tools via the Model Context Protocol (MCP) for direct agent integration.
 
@@ -372,8 +484,8 @@ Shannon exposes tools via the Model Context Protocol (MCP) for direct agent inte
 
 | Transport | Use Case | Implementation |
 |-----------|----------|---------------|
-| **Stdio** | Local agent on same machine or LAN (Hermes on Windows) | `shannon_mcp_server.py` — translates stdio JSON-RPC → HTTP REST |
-| **Native** | Agent on same Linux host (OpenClaw/Guy) | `shannon/mcp_server.py` — direct Python function calls, no HTTP |
+| **Stdio** | Agent on another machine / different OS | `shannon_mcp_server.py` — translates stdio JSON-RPC → HTTP REST |
+| **Native** | Agent on same host | `shannon/mcp_server.py` — direct Python function calls, no HTTP |
 
 ### MCP Tools (6 tools)
 
@@ -386,93 +498,15 @@ Shannon exposes tools via the Model Context Protocol (MCP) for direct agent inte
 | `memory_agents` | List all agents | `GET /agents` |
 | `memory_context` | Regenerate context file | `POST /context/regenerate` |
 
-### Agent Identity Isolation
+### Identity Isolation
 
-**CRITICAL:** All MCP tools hardcode the agent identity. A tool call from Hermes always uses `agent=hermes`. The tool arguments cannot override this. Each agent has its own isolated memory slice.
-
----
-
-## 7. Multi-Tenant Support
-
-Shannon supports external tenants via Bearer token authentication:
-
-- `Authorization: Bearer <token>` in HTTP headers
-- Tenant data is fully isolated from internal agent data
-- Profile-scoped tokens restrict reads/writes to a specific profile within a tenant
-- Trial lifecycle: 7-day trial → pause → wipe after 30 days
-- Tenant operations: register, authenticate, pause, wipe, revoke token
-
-This is for future SaaS use. Internal agents (Guy, Hermes, Gitflow) use the agent parameter path, not Bearer tokens.
+**CRITICAL:** MCP tools hardcode the caller's identity. A tool call from Hermes always uses `agent=hermes`. The tool arguments cannot override this. Each agent/tenant has its own isolated memory slice.
 
 ---
 
-## 8. Operational Patterns
+## 8. Scoring Deep Dive
 
-### 8.1 Session Start (Agent Bootstrap)
-
-Every agent session should begin by loading context:
-
-```bash
-# 1. Check health
-curl -s http://localhost:8765/health
-
-# 2. Load relevant context (replace TOPIC with current work)
-curl -s "http://localhost:8765/memory?agent=hermes&topic=current+project+context&limit_tokens=4000"
-```
-
-### 8.2 During Session (Save Decisions)
-
-When something worth remembering happens:
-
-```bash
-curl -s -X POST http://localhost:8765/memory \
-  -H "Content-Type: application/json" \
-  -d '{
-    "body": "Decided to use stdio MCP transport for Windows integration because SSE was unreliable in Hermes environment",
-    "agent": "hermes",
-    "tags": ["decision", "architecture", "mcp"],
-    "session_id": "hermes-2026-06-18"
-  }'
-```
-
-### 8.3 Session End (Save Summary)
-
-```bash
-curl -s -X POST http://localhost:8765/memory \
-  -H "Content-Type: application/json" \
-  -d '{
-    "body": "SESSION 2026-06-18: Set up Shannon MCP stdio server on Windows. Gmail OAuth configured. 6 MCP tools working. Backup to D: drive started (57GB of 114GB copied).",
-    "agent": "hermes",
-    "tags": ["session-summary", "milestone"],
-    "session_id": "hermes-2026-06-18"
-  }'
-```
-
-### 8.4 Context Regeneration
-
-```bash
-curl -s -X POST http://localhost:8765/context/regenerate
-```
-
-This creates a flat-file summary at `memory/shannon-context.md` for use when Shannon is down.
-
-### 8.5 Distillation (Periodic)
-
-Run distillation to detect repeated patterns and create rules:
-
-```bash
-# Preview first
-curl -s -X POST "http://localhost:8765/distill?agent=hermes&days=30&dry_run=true"
-
-# If the rules look good, save them
-curl -s -X POST "http://localhost:8765/distill?agent=hermes&days=30"
-```
-
----
-
-## 9. Scoring Deep Dive
-
-Shannon doesn't just find matching entries — it ranks them through a multi-factor scoring system:
+Shannon doesn't just find matching entries — it ranks them through a multi-factor scoring system.
 
 ### Composite Score Formula
 
@@ -490,7 +524,6 @@ final_score = tier_weight × (0.50 × semantic_sim + 0.25 × recency + 0.25 × t
 ### Recency (25% weight)
 - Exponential decay with 7-day (168-hour) half-life
 - Formula: `recency = 0.5 ^ (hours_since_creation / 168)`
-- An entry from 7 days ago gets 0.5; from 14 days ago gets 0.25
 - Entries containing update keywords ("revised", "corrected", "supersedes") get a recency boost
 
 ### Trust (25% weight)
@@ -509,94 +542,168 @@ final_score = tier_weight × (0.50 × semantic_sim + 0.25 × recency + 0.25 × t
 - Creates "neighborhood" retrieval — related entries surface together
 
 ### Supersession
-- If an entry is detected as superseding another (via keywords like "actually", "turns out", "corrected"), the old entry is marked superseded and deprioritized
+- If an entry is detected as superseding another (via keywords like "actually", "turns out", "corrected"), the old entry is deprioritized
 - Prevents stale/incorrect information from being retrieved
 
 ---
 
-## 10. Infrastructure
+## 9. Operational Patterns
 
-### Current Deployment
+### 9.1 Session Start — Load Context
 
-| Component | Location | Details |
-|-----------|----------|---------|
-| Shannon Service | `192.168.0.68:8765` (Linux workstation) | systemd: `shannon.service`, user: `ron` |
-| Database | `~/.shannon/dictionary/layer_1/index.db` | SQLite, ~21K entries |
-| Embeddings | `~/.shannon/dictionary/layer_1/embeddings.db` | SQLite, 1024-dim vectors |
-| Chunks | `~/.shannon/dictionary/layer_1/chunks/` | Raw text files, Zeckendorf-addressed |
-| Embedding Model | Ollama on port 11434 | `mxbai-embed-large` (1024 dimensions) |
-| Context File | `~/.openclaw/workspace/memory/shannon-context.md` | Flat-file fallback |
+Every session should begin by loading relevant context:
+
+```bash
+# CaaS user
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://shannon.example.com/memory?topic=current+project&limit_tokens=4000"
+
+# Internal agent
+curl -s "http://localhost:8765/memory?agent=myagent&topic=current+project&limit_tokens=4000"
+```
+
+### 9.2 During Session — Save What Matters
+
+When something worth remembering happens:
+
+```bash
+curl -s -X POST http://localhost:8765/memory \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "body": "Decided to use stdio MCP transport for Windows integration because SSE was unreliable",
+    "tags": ["decision", "architecture", "mcp"],
+    "session_id": "session-2026-06-18"
+  }'
+```
+
+### 9.3 Session End — Save Summary
+
+```bash
+curl -s -X POST http://localhost:8765/memory \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "body": "SESSION 2026-06-18: Set up Shannon MCP on Windows. Gmail OAuth configured. 6 MCP tools working.",
+    "tags": ["session-summary", "milestone"],
+    "session_id": "session-2026-06-18"
+  }'
+```
+
+### 9.4 Export for Other AI Tools
+
+Export your knowledge as markdown to paste into ChatGPT, Claude, Gemini, etc.:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://shannon.example.com/tenant/export?topic=engine+diagnostics&limit_tokens=8000" \
+  -o context.md
+```
+
+### 9.5 Distillation (Periodic)
+
+Run distillation to detect repeated patterns and create rules:
+
+```bash
+# Preview first
+curl -s -X POST "http://localhost:8765/distill?agent=myagent&days=30&dry_run=true"
+
+# If the rules look good, save them
+curl -s -X POST "http://localhost:8765/distill?agent=myagent&days=30"
+```
+
+---
+
+## 10. Integration Checklist for New Users
+
+### CaaS Users (Bearer Token)
+
+1. **Register:** `POST /tenant/register` with your email
+2. **Save your token** — shown once, never again
+3. **Create profiles** for different knowledge domains (optional but recommended)
+4. **Start saving:** Use `POST /memory` with your Bearer token on every request
+5. **Start retrieving:** Use `GET /memory?topic=...` to load context into sessions
+6. **Export:** Use `GET /tenant/export` to take your knowledge to other AI tools
+7. **Tag consistently** — use meaningful tags for proper tier auto-assignment
+
+### Internal Agents (Agent ID)
+
+1. **Choose an agent ID** — lowercase, descriptive, permanent (e.g., `hermes`, `gitflow`)
+2. **Register:** `POST /agents {"agent_id": "myagent"}`
+3. **Choose transport:** same machine → native MCP or HTTP; LAN → stdio MCP bridge or HTTP
+4. **Hardcode agent identity** — never let tool arguments override the agent ID
+5. **Implement session start** — query `/memory` for context at session begin
+6. **Implement save pattern** — save decisions, milestones, lessons during sessions
+7. **Tag consistently** — use meaningful tags for tier auto-assignment
+
+---
+
+## 11. Tag Taxonomy
+
+Use these tags consistently for proper tier assignment and retrieval quality.
+
+### Tier 1 (Gold) Tags — Always Retrieved First (1.5× boost)
+`skill`, `skill-building`, `decision`, `architecture`, `milestone`, `skill-compilation`, `course-to-skill`, `project-setup`, `lesson-learned`
+
+### Tier 2 (Silver) Tags — Standard Priority (1.0×)
+Everything not matching Tier 1 or Tier 3.
+
+### Tier 3 (Bronze) Tags — Background/Reference (0.5×)
+`youtube`, `transcript`, `raw-note`
+
+### Trust Tags — Affect Scoring Weight
+- **High trust (1.0):** `verified`, `causal-knowledge`, `founder`, `distilled-rule`
+- **Default (0.5):** No trust tag
+- **Low trust (0.1):** `spurious-correlation`, `no-causation`
+
+### Recommended Contextual Tags
+`session-summary`, `error-resolution`, `preference`, `relationship`, `infrastructure`, `backup`, `personal`, `project-context`, `procedure`, `diagnostic`, `supplier`, `part-reference`, `schedule`, `health`
+
+---
+
+## 12. Common Mistakes
+
+| Mistake | Consequence | Fix |
+|---------|------------|-----|
+| Saving raw data streams | Retrieval polluted with noise, real entries buried | Distill first — activity summaries, not keystroke logs |
+| Saving raw email threads | Signatures, disclaimers, quoted replies clutter results | Summarize → extract decisions/actions → save summary |
+| Saving raw keystroke/event streams | Massive noise, buries real entries | Distill into activity summaries: "3 hours in Excel on RMA" |
+| No tags on entries | All entries default to Tier 2, no trust weighting | Always include at least 1-2 descriptive tags |
+| Duplicate saves | Same fact appears multiple times, wastes token budget | Search before saving; use "supersedes" language when updating |
+| Saving ephemeral state | "It's 3pm" or "CPU at 45%" clutter the index | Only save if it's diagnostic context for a specific issue |
+| Overriding agent/tenant ID | Cross-user data contamination | Hardcode identity; never accept it from tool arguments |
+| Saving secrets | Credentials exposed in retrievals | Use a proper secret store. Shannon is for context, not keys. |
+
+---
+
+## 13. Infrastructure (Self-Hosted)
+
+For users running their own Shannon instance.
 
 ### Service Management
 
 ```bash
-# Start/stop/restart
 sudo systemctl start shannon
 sudo systemctl stop shannon
 sudo systemctl restart shannon
 sudo systemctl status shannon
-
-# Logs
 journalctl -u shannon -f
 ```
 
-### Networking
+### File Locations
 
-- **LAN access:** Any device on `192.168.0.0/24` can reach Shannon at port 8765
-- **No TLS (Phase 1):** HTTP only. Auth tokens are for tenant isolation, not transport security.
-- **VPN note:** NordVPN may block LAN traffic — ensure split-tunnel allows `192.168.0.0/24`
+| Component | Default Path |
+|-----------|-------------|
+| Database | `~/.shannon/dictionary/layer_1/index.db` |
+| Embeddings | `~/.shannon/dictionary/layer_1/embeddings.db` |
+| Chunks | `~/.shannon/dictionary/layer_1/chunks/` |
+| Context file | Configured per deployment |
 
----
+### Requirements
 
-## 11. Connected Agents
-
-| Agent | Entry Count | Purpose |
-|-------|-------------|---------|
-| `guy` | ~15,000 | Primary agent (Ron's main AI partner). Architecture, decisions, milestones. |
-| `hermes` | 8 (growing) | Windows agent. Personal context, backup ops, daily life management. |
-| `gitflow` | ~200 | OODA loop substrate development context. |
-| `benchmark` | ~1,100 | Benchmark test entries from stress testing. |
-
----
-
-## 12. Integration Checklist for New Agents
-
-When connecting a new agent to Shannon:
-
-1. **Choose an agent ID** — lowercase, descriptive, permanent (e.g., `hermes`, `gitflow`)
-2. **Register the agent:** `POST /agents {"agent_id": "myagent"}`
-3. **Choose transport:**
-   - Same machine → native MCP (`mcp_server.py`) or direct HTTP
-   - LAN → HTTP REST or stdio MCP bridge
-4. **Hardcode agent identity** — never let tool arguments override the agent ID
-5. **Implement session start** — query `/memory` for context at session begin
-6. **Implement save pattern** — save decisions, milestones, lessons during sessions
-7. **Tag consistently** — use meaningful tags (see Section 4) for tier auto-assignment
-8. **Test the cycle:** save → retrieve → verify the entry surfaces correctly
-
----
-
-## 13. Hermes-Specific: Windows Setup (Quick Reference)
-
-For the complete step-by-step, see `HERMES_SHANNON_MCP_DUPLICATE_WORKFLOW.md`.
-
-**Summary:**
-1. Gmail OAuth setup (for email-based spec delivery)
-2. Build `shannon_mcp_server.py` (stdio, stdlib-only, Hermes venv Python)
-3. Configure `config.yaml` with MCP server entry
-4. Verify: `hermes mcp test shannon-memory`
-
-**Config entry:**
-```yaml
-mcp_servers:
-  shannon-memory:
-    command: "C:\\Users\\ronpe\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\python.exe"
-    args: ["-u", "C:\\Users\\ronpe\\shannon-mcp\\shannon_mcp_server.py"]
-    env:
-      SHANNON_URL: "http://192.168.0.68:8765"
-      SHANNON_AGENT: "hermes"
-    enabled: true
-```
+- Python 3.11+
+- Ollama with `mxbai-embed-large` model (for embeddings)
+- ~200MB disk for base install; grows with entries
 
 ---
 
@@ -604,48 +711,18 @@ mcp_servers:
 
 | Phase | Feature | Status |
 |-------|---------|--------|
-| 1 (Current) | HTTP REST + MCP stdio + agent isolation | ✅ Live |
-| 2 | Bearer token authentication for all endpoints | 🔲 Planned |
-| 3 | ML-DSA-87 challenge-response (PQC identity) | 🔲 Planned |
-| 4 | mTLS / HTTPS transport encryption | 🔲 Planned |
-| 5 | Budget metering at MCP layer | 🔲 Planned |
+| 1 (Current) | HTTP REST + MCP + agent isolation + CaaS tenants | ✅ Live |
+| 2 | Bearer token auth on all endpoints | ✅ Live |
+| 3 | Knowledge profiles + profile-scoped tokens | ✅ Live |
+| 4 | Export to markdown (paste into any AI) | ✅ Live |
+| 5 | ML-DSA-87 challenge-response (PQC identity) | 🔲 Planned |
+| 6 | mTLS / HTTPS transport encryption | 🔲 Planned |
+| 7 | Budget metering at MCP layer | 🔲 Planned |
 | — | Distillation automation (periodic pattern detection) | 🔲 Planned |
-| — | Cross-agent knowledge sharing (with consent) | 🔲 Planned |
-| — | Lattice Network integration (distributed addressing) | 🔲 Planned |
+| — | Cross-tenant knowledge sharing (with consent) | 🔲 Planned |
 
 ---
 
-## Appendix A: Tag Taxonomy
-
-Use these tags consistently for proper tier assignment and retrieval quality:
-
-### Tier 1 (Gold) Tags — Always Retrieved First
-`skill`, `skill-building`, `decision`, `architecture`, `milestone`, `skill-compilation`, `course-to-skill`, `claude-drop`, `project-setup`, `lesson-learned`
-
-### Tier 3 (Bronze) Tags — Deprioritized
-`youtube`, `transcript`, `raw-note`
-
-### Trust Tags — Affect Scoring Weight
-- **High trust:** `verified`, `causal-knowledge`, `founder`, `distilled-rule`
-- **Low trust:** `spurious-correlation`, `no-causation`
-
-### Recommended Contextual Tags
-`session-summary`, `error-resolution`, `preference`, `relationship`, `infrastructure`, `backup`, `personal`, `project-context`
-
----
-
-## Appendix B: Common Mistakes
-
-| Mistake | Consequence | Fix |
-|---------|------------|-----|
-| Saving raw email threads | Retrieval polluted with signatures, disclaimers, quoted replies | Summarize → extract decisions/actions → save summary |
-| Saving raw keystroke/event streams | Massive noise, buries real entries | Distill into activity summaries: "3 hours in Excel on RMA" not "keypress: a, b, c..." |
-| No tags on entries | All entries default to Tier 2, no trust weighting | Always include at least agent tag + 1-2 descriptive tags |
-| Duplicate saves | Same fact appears multiple times, wastes token budget on retrieval | Search before saving; if updating, use "supersedes" language |
-| Saving ephemeral state | "It's 3pm" or "CPU at 45%" clutter the index | Only save if it's diagnostic context for a problem resolution |
-| Overriding agent ID | Cross-agent contamination | Hardcode agent ID in MCP server; never accept it from tool args |
-
----
-
-*Document Control: Version 1.0 | Classification: SAMLLC Internal*
+*Document Control: Version 2.0 | Shannon Memory Service*
 *Maintained at: `~/development/shannon/SHANNON_OPERATIONS_GUIDE.md`*
+*Repository: [github.com/SAMLLC-PROD/Shannon](https://github.com/SAMLLC-PROD/Shannon)*
