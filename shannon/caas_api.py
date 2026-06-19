@@ -28,6 +28,12 @@ from .tenants import (
     register_tenant,
     wipe_tenant,
     init_tenant_schema,
+    register_machine_identity,
+    get_machine_identity,
+    update_identity_last_auth,
+    create_session,
+    authenticate_session,
+    SESSION_TTL_SECONDS,
 )
 from .export import export_tenant_memory
 from .source_viewer import auth_error_page, render_source_page
@@ -399,6 +405,180 @@ def resolve_conflict_endpoint(payload: ResolveConflictRequest, tenant: AuthRequi
         "conflict_group_id": payload.conflict_group_id,
         "winning_entry_id": payload.winning_entry_id,
         "entries_superseded": updated,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /tenant/identity/register  — link NFT to tenant
+# ---------------------------------------------------------------------------
+
+class RegisterIdentityRequest(BaseModel):
+    nft_token_id:   int
+    machine_name:   str
+    wallet_address: str
+    public_key_hex: str  # ML-DSA-87 public key, 2592 bytes → 5184 hex chars
+
+
+@router.post("/tenant/identity/register", status_code=201)
+def register_identity(payload: RegisterIdentityRequest, tenant: AuthRequired):
+    """
+    Bind a LatticeIdentity NFT to the calling tenant.
+
+    The machine's ML-DSA-87 public key is cached here so subsequent
+    challenge-response verifications don't require an on-chain RPC call.
+    The client is responsible for providing the correct public key; the
+    operator can verify it against Polygon at any time.
+    """
+    try:
+        pk_bytes = bytes.fromhex(payload.public_key_hex)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="public_key_hex is not valid hex")
+
+    if len(pk_bytes) != 2592:
+        raise HTTPException(
+            status_code=422,
+            detail=f"ML-DSA-87 public key must be 2592 bytes, got {len(pk_bytes)}",
+        )
+
+    register_machine_identity(
+        tenant_id=tenant["tenant_id"],
+        nft_token_id=payload.nft_token_id,
+        machine_name=payload.machine_name,
+        wallet_address=payload.wallet_address,
+        public_key_bytes=pk_bytes,
+    )
+    return {
+        "ok": True,
+        "tenant_id": tenant["tenant_id"],
+        "nft_token_id": payload.nft_token_id,
+        "machine_name": payload.machine_name,
+        "message": (
+            "Identity registered. Use POST /tenant/auth/challenge to begin "
+            "a challenge-response session."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /tenant/auth/challenge  — issue a challenge
+# ---------------------------------------------------------------------------
+
+class ChallengeRequest(BaseModel):
+    machine_id:   str
+    nft_token_id: int
+
+
+@router.post("/tenant/auth/challenge")
+def auth_challenge(payload: ChallengeRequest):
+    """
+    Issue a 32-byte (64 hex char) challenge for the named machine.
+
+    The machine must sign the challenge bytes with its ML-DSA-87 private key
+    and submit within 60 seconds to POST /tenant/auth/verify.
+    Challenges are one-time-use; a new call replaces any pending challenge.
+    """
+    from .auth_challenge import issue_challenge
+
+    # Verify the NFT is registered with some tenant before issuing a challenge
+    identity = get_machine_identity(payload.nft_token_id)
+    if not identity:
+        raise HTTPException(
+            status_code=404,
+            detail=f"NFT token_id {payload.nft_token_id} not registered. "
+                   "Call POST /tenant/identity/register first.",
+        )
+
+    challenge = issue_challenge(payload.machine_id)
+    return {
+        "challenge":   challenge,
+        "machine_id":  payload.machine_id,
+        "expires_in":  60,
+        "instruction": (
+            "Sign the challenge bytes (bytes.fromhex(challenge)) with your "
+            "ML-DSA-87 private key and POST the hex signature to /tenant/auth/verify."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /tenant/auth/verify  — verify signature, issue session token
+# ---------------------------------------------------------------------------
+
+class VerifyRequest(BaseModel):
+    machine_id:    str
+    nft_token_id:  int
+    challenge:     str  # must match the issued challenge (replay guard)
+    signature_hex: str  # ML-DSA-87 signature over bytes.fromhex(challenge)
+
+
+@router.post("/tenant/auth/verify")
+def auth_verify(payload: VerifyRequest):
+    """
+    Verify an ML-DSA-87 challenge-response and issue a short-lived session token.
+
+    Steps:
+      1. Retrieve the stored challenge (must exist and not be expired)
+      2. Verify the challenge matches what was issued
+      3. Load the cached ML-DSA-87 public key for the NFT
+      4. Verify the signature
+      5. Issue a session token (valid for 1 hour)
+      6. Consume the challenge (one-time use)
+    """
+    from .auth_challenge import consume_challenge, verify_signature, peek_challenge
+
+    # 1. Check the challenge exists
+    live_challenge = peek_challenge(payload.machine_id)
+    if not live_challenge:
+        raise HTTPException(
+            status_code=401,
+            detail="No active challenge for this machine_id — it may have expired (60s TTL). "
+                   "Request a new one via POST /tenant/auth/challenge.",
+        )
+
+    # 2. Verify it matches what was issued (prevents substitution attacks)
+    if live_challenge != payload.challenge:
+        raise HTTPException(status_code=401, detail="Challenge mismatch.")
+
+    # 3. Load public key
+    identity = get_machine_identity(payload.nft_token_id)
+    if not identity:
+        raise HTTPException(
+            status_code=404,
+            detail=f"NFT token_id {payload.nft_token_id} not registered.",
+        )
+
+    # 4. Verify signature
+    try:
+        valid = verify_signature(
+            identity["public_key_bytes"],
+            payload.challenge,
+            payload.signature_hex,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Signature verification unavailable: {exc}",
+        )
+
+    if not valid:
+        raise HTTPException(status_code=401, detail="Signature verification failed.")
+
+    # 5 & 6. Consume challenge (one-time use) and issue session token
+    consume_challenge(payload.machine_id)
+    update_identity_last_auth(identity["tenant_id"], payload.nft_token_id)
+    session_token = create_session(
+        tenant_id=identity["tenant_id"],
+        machine_id=payload.machine_id,
+        nft_token_id=payload.nft_token_id,
+    )
+
+    return {
+        "session_token": session_token,
+        "tenant_id":     identity["tenant_id"],
+        "machine_id":    payload.machine_id,
+        "nft_token_id":  payload.nft_token_id,
+        "machine_name":  identity["machine_name"],
+        "expires_in":    SESSION_TTL_SECONDS,
     }
 
 

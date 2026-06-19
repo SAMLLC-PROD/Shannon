@@ -460,6 +460,143 @@ def generate_profile_token(tenant_id: str, profile_id: str) -> str:
     return token
 
 
+# ---------------------------------------------------------------------------
+# Machine identity — tenant ↔ NFT binding
+# ---------------------------------------------------------------------------
+
+def init_identity_schema() -> None:
+    """Create tenant_identities and sessions tables."""
+    init_profile_tokens_schema()
+    conn = _connect()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tenant_identities (
+            tenant_id       TEXT NOT NULL REFERENCES tenants(tenant_id),
+            nft_token_id    INTEGER NOT NULL,
+            machine_name    TEXT NOT NULL,
+            wallet_address  TEXT NOT NULL,
+            public_key_hex  TEXT NOT NULL,
+            registered_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_auth_at    TEXT,
+            PRIMARY KEY (tenant_id, nft_token_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_token TEXT PRIMARY KEY,
+            tenant_id     TEXT NOT NULL,
+            machine_id    TEXT NOT NULL,
+            nft_token_id  INTEGER NOT NULL,
+            expires_at    TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def register_machine_identity(
+    tenant_id: str,
+    nft_token_id: int,
+    machine_name: str,
+    wallet_address: str,
+    public_key_bytes: bytes,
+) -> None:
+    """Link an NFT to a tenant with its cached ML-DSA-87 public key."""
+    init_identity_schema()
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect()
+    conn.execute(
+        """INSERT INTO tenant_identities
+           (tenant_id, nft_token_id, machine_name, wallet_address, public_key_hex, registered_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(tenant_id, nft_token_id) DO UPDATE SET
+               machine_name   = excluded.machine_name,
+               wallet_address = excluded.wallet_address,
+               public_key_hex = excluded.public_key_hex,
+               registered_at  = excluded.registered_at""",
+        (tenant_id, nft_token_id, machine_name, wallet_address,
+         public_key_bytes.hex(), now),
+    )
+    conn.commit()
+    conn.close()
+    log.info("Registered machine identity: tenant=%s nft=%d machine=%s",
+             tenant_id, nft_token_id, machine_name)
+
+
+def get_machine_identity(nft_token_id: int) -> Optional[dict]:
+    """Look up identity by NFT token ID. Returns dict with public_key_bytes or None."""
+    init_identity_schema()
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM tenant_identities WHERE nft_token_id = ?",
+        (nft_token_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["public_key_bytes"] = bytes.fromhex(d["public_key_hex"])
+    return d
+
+
+def update_identity_last_auth(tenant_id: str, nft_token_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect()
+    conn.execute(
+        "UPDATE tenant_identities SET last_auth_at=? WHERE tenant_id=? AND nft_token_id=?",
+        (now, tenant_id, nft_token_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+SESSION_TTL_SECONDS = 3600  # 1 hour
+
+
+def create_session(tenant_id: str, machine_id: str, nft_token_id: int) -> str:
+    """Issue an opaque session token valid for SESSION_TTL_SECONDS seconds."""
+    init_identity_schema()
+    token = secrets.token_urlsafe(32)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=SESSION_TTL_SECONDS)
+    ).isoformat()
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO sessions (session_token, tenant_id, machine_id, nft_token_id, expires_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (token, tenant_id, machine_id, nft_token_id, expires_at),
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def authenticate_session(token: str) -> Optional[dict]:
+    """Validate a session token. Returns session dict or None if missing/expired."""
+    init_identity_schema()
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM sessions WHERE session_token = ?", (token,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    session = dict(row)
+    if datetime.now(timezone.utc) > _parse_dt(session["expires_at"]):
+        return None
+    return session
+
+
+def cleanup_expired_sessions() -> int:
+    """Delete expired session rows. Returns count removed."""
+    init_identity_schema()
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect()
+    cursor = conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+    conn.commit()
+    conn.close()
+    return cursor.rowcount
+
+
 def authenticate_profile(token: str) -> Optional[dict]:
     """
     Resolve a token to a specific profile. Returns dict with tenant_id + profile_id.
