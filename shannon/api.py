@@ -214,16 +214,27 @@ async def search_memory(
         tid = tenant["tenant_id"]
         log_trial_request(tid, "GET", "/memory/search")
         rows = conn.execute(
-            "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
+            "SELECT content_hash, created_at, session_id, tags, tier, "
+            "COALESCE(superseded_by, '') as superseded_by FROM entries "
             "WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 2000",
             (tid,),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT content_hash, created_at, session_id, tags, tier FROM entries "
+            "SELECT content_hash, created_at, session_id, tags, tier, "
+            "COALESCE(superseded_by, '') as superseded_by FROM entries "
             "WHERE tenant_id IS NULL ORDER BY created_at DESC LIMIT 2000"
         ).fetchall()
     conn.close()
+
+    # Drop conflict-losers and tag-noise (pre-scrub / superseded markers)
+    rows = [
+        r for r in rows
+        if not (r["superseded_by"] or "")
+        and "superseded" not in json.loads(r["tags"] or "[]")
+        and "pre-scrub" not in json.loads(r["tags"] or "[]")
+        and "noise" not in json.loads(r["tags"] or "[]")
+    ]
 
     # Agent filter (internal only)
     if agent and not tenant:
