@@ -72,3 +72,27 @@ def test_different_data_different_address():
     addr1 = write("chunk alpha")
     addr2 = write("chunk beta")
     assert addr1 != addr2
+
+
+def test_init_store_has_all_columns(tmp_path, monkeypatch):
+    """Fresh DB from init_store() must have tenant_id and other late columns."""
+    import sqlite3
+    from shannon import store
+
+    # Origin store resolves paths from module constants, not an env var.
+    layer1 = tmp_path / "dictionary" / "layer_1"
+    monkeypatch.setattr(store, "CHUNKS_DIR", layer1 / "chunks")
+    monkeypatch.setattr(store, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(store, "INDEX_DB", layer1 / "index.db")
+
+    store.init_store()
+    conn = sqlite3.connect(layer1 / "index.db")
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(entries)").fetchall()}
+    conn.close()
+    for col in ("tenant_id", "tier", "profile_id", "conflict_group_id", "superseded_by", "supersedes"):
+        assert col in cols, f"Column {col!r} missing after init_store()"
+
+    # Reads that filter on late columns must work before any write.
+    assert store.get_superseded_hashes() == set()
+    assert store.resolve_conflict("no-such-group", "x", tenant_id="t") == 0
+    store.init_store()  # idempotent

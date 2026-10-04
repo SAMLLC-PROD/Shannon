@@ -3,7 +3,10 @@ Shannon LLM interface — Ollama first, cloud fallback.
 
 Priority:
   1. Ollama (local, private, free after hardware)
-  2. Anthropic Claude (cloud fallback)
+  2. Anthropic Claude (cloud fallback — only when SHANNON_ALLOW_CLOUD is set)
+
+SHANNON_ALLOWED_MODELS (comma-separated) restricts which model ids may be
+requested. Unset = unrestricted, with graceful fallback between local models.
 
 Both sync and async interfaces provided.
 FastAPI should use the async versions to avoid blocking the event loop.
@@ -17,6 +20,32 @@ from typing import Optional, List, Dict
 OLLAMA_BASE   = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.environ.get("SHANNON_MODEL", "qwen2.5:7b")
 FAST_MODEL    = os.environ.get("SHANNON_FAST_MODEL", "mistral:7b")
+
+# Cloud is opt-in. Without this flag the Anthropic fallback never runs.
+SHANNON_ALLOW_CLOUD = os.environ.get("SHANNON_ALLOW_CLOUD", "").lower() in ("1", "true", "yes")
+_CLOUD_REFUSED = "Ollama unavailable and SHANNON_ALLOW_CLOUD not set — refusing cloud fallback"
+
+SHANNON_ALLOWED_MODELS_ENV = os.environ.get("SHANNON_ALLOWED_MODELS", "").strip()
+
+
+def allowed_models() -> List[str]:
+    """
+    When SHANNON_ALLOWED_MODELS is set, only those model ids are accepted.
+    When unset (our default), any available Ollama model is fine — we're
+    experimenting locally. CE operators set an explicit list.
+    """
+    if SHANNON_ALLOWED_MODELS_ENV:
+        return [x.strip() for x in SHANNON_ALLOWED_MODELS_ENV.split(",") if x.strip()]
+    return []  # empty = unrestricted
+
+
+def _check_allowed(model: str) -> None:
+    """Raise if an allow-list is set and `model` is not on it."""
+    allowed = allowed_models()
+    if allowed and model not in allowed:
+        raise RuntimeError(
+            f"Model {model!r} is not in SHANNON_ALLOWED_MODELS — refusing to substitute"
+        )
 
 # Ollama availability cache — avoid checking on every request
 import time as _time
@@ -51,7 +80,18 @@ def ollama_models() -> List[str]:
 
 
 def _resolve_model(model: str, available: List[str]) -> str:
-    """Pick best available model, falling back gracefully."""
+    """Pick best available model, falling back gracefully.
+
+    With SHANNON_ALLOWED_MODELS set there is no substitution: the requested
+    model must be on the list and present in Ollama.
+    """
+    if allowed_models():
+        _check_allowed(model)
+        if model in available:
+            return model
+        raise RuntimeError(
+            f"Model {model!r} is allowed but not available in Ollama. Run: ollama pull {model}"
+        )
     if model in available:
         return model
     if DEFAULT_MODEL in available:
@@ -136,7 +176,10 @@ async def chat_async(
     Async unified chat — Ollama first (unless SHANNON_PREFER_CLOUD=true), Anthropic fallback.
     Use this in FastAPI endpoints.
     """
-    prefer_cloud = os.environ.get("SHANNON_PREFER_CLOUD", "").lower() in ("1", "true", "yes")
+    _check_allowed(model or DEFAULT_MODEL)
+    # SHANNON_PREFER_CLOUD only counts when cloud is allowed at all
+    prefer_cloud = SHANNON_ALLOW_CLOUD and os.environ.get("SHANNON_PREFER_CLOUD", "").lower() in ("1", "true", "yes")
+    ollama_err = None
 
     if not prefer_cloud and await ollama_available_async():
         try:
@@ -144,8 +187,11 @@ async def chat_async(
             used_model = _resolve_model(model or DEFAULT_MODEL, available)
             content = await ollama_chat_async(messages, model=used_model, system=system)
             return {"content": content, "backend": "ollama", "model": used_model}
-        except Exception:
-            pass  # fall through to cloud
+        except Exception as e:
+            ollama_err = e  # fall through to cloud
+
+    if not SHANNON_ALLOW_CLOUD:
+        raise RuntimeError(_CLOUD_REFUSED) from ollama_err
 
     # Cloud — AsyncAnthropic to avoid blocking the event loop
     try:
@@ -173,7 +219,10 @@ async def chat_stream_async(
     Ollama skipped if SHANNON_PREFER_CLOUD=true.
     Use with FastAPI StreamingResponse for real-time UI updates.
     """
-    prefer_cloud = os.environ.get("SHANNON_PREFER_CLOUD", "").lower() in ("1", "true", "yes")
+    _check_allowed(model or DEFAULT_MODEL)
+    # SHANNON_PREFER_CLOUD only counts when cloud is allowed at all
+    prefer_cloud = SHANNON_ALLOW_CLOUD and os.environ.get("SHANNON_PREFER_CLOUD", "").lower() in ("1", "true", "yes")
+    ollama_err = None
 
     if not prefer_cloud and await ollama_available_async():
         try:
@@ -192,8 +241,11 @@ async def chat_stream_async(
                                 yield delta
                             if chunk.get("done"):
                                 return
-        except Exception:
-            pass  # fall through to cloud
+        except Exception as e:
+            ollama_err = e  # fall through to cloud
+
+    if not SHANNON_ALLOW_CLOUD:
+        raise RuntimeError(_CLOUD_REFUSED) from ollama_err
 
     # Cloud streaming — AsyncAnthropic
     import anthropic
@@ -211,14 +263,19 @@ async def chat_stream_async(
 
 # Sync unified chat (scripts/CLI)
 def chat(messages: List[Dict], system: str = None, model: str = None, prefer_local: bool = True) -> Dict:
-    if prefer_local and ollama_available():
+    _check_allowed(model or DEFAULT_MODEL)
+    # prefer_local=False only skips Ollama when cloud is allowed at all
+    ollama_err = None
+    if (prefer_local or not SHANNON_ALLOW_CLOUD) and ollama_available():
         try:
             available = ollama_models()
             used_model = _resolve_model(model or DEFAULT_MODEL, available)
             content = ollama_chat(messages, model=used_model, system=system)
             return {"content": content, "backend": "ollama", "model": used_model}
-        except Exception:
-            pass
+        except Exception as e:
+            ollama_err = e
+    if not SHANNON_ALLOW_CLOUD:
+        raise RuntimeError(_CLOUD_REFUSED) from ollama_err
     try:
         import anthropic
         client = anthropic.Anthropic(
@@ -245,6 +302,8 @@ def status() -> Dict:
             "default_ready": DEFAULT_MODEL in available,
             "fast_ready": FAST_MODEL in available,
         },
+        "allowed_models": allowed_models(),
+        "cloud_allowed": SHANNON_ALLOW_CLOUD,
         "preferred_backend": "ollama" if ollama_available() and available else "cloud",
     }
 

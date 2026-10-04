@@ -61,23 +61,33 @@ def init_store() -> None:
             USING fts5(content_hash, address, tags, content='entries');
     """)
     conn.commit()
-    # Add tier column — ALTER TABLE doesn't support IF NOT EXISTS in SQLite
-    try:
-        conn.execute("ALTER TABLE entries ADD COLUMN tier INTEGER DEFAULT 2")
-        conn.commit()
-    except Exception:
-        pass  # column already exists
-    # Conflict detection columns (Issue #17)
-    for col_ddl in [
-        "ALTER TABLE entries ADD COLUMN conflict_group_id TEXT",
-        "ALTER TABLE entries ADD COLUMN superseded_by TEXT",
-    ]:
-        try:
-            conn.execute(col_ddl)
-            conn.commit()
-        except Exception:
-            pass
+    _run_migrations(conn)
     conn.close()
+
+
+# Columns added after the original schema. ALTER TABLE doesn't support
+# IF NOT EXISTS in SQLite, so each one is checked against PRAGMA table_info.
+_MIGRATIONS = [
+    ("tier",              "INTEGER DEFAULT 2"),
+    ("conflict_group_id", "TEXT"),            # Issue #17
+    ("superseded_by",     "TEXT"),            # Issue #17
+    ("tenant_id",         "TEXT"),
+    ("profile_id",        "TEXT"),
+    ("supersedes",        "TEXT DEFAULT '[]'"),
+]
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Add every post-v1 column to `entries`. Idempotent.
+
+    Runs from init_store() so a fresh DB has the full schema before the
+    first read — recall/search must not depend on a prior write.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(entries)").fetchall()}
+    for col, ddl in _MIGRATIONS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE entries ADD COLUMN {col} {ddl}")
+    conn.commit()
 
 
 def _connect() -> sqlite3.Connection:

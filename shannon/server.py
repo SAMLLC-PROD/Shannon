@@ -7,4 +7,4 @@ from shannon.mcp_mount import mount_mcp
 mount_mcp(app)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("SHANNON_API_PORT", "8765")))
+    uvicorn.run(app, host=os.getenv("SHANNON_BIND_HOST", "127.0.0.1"), port=int(os.getenv("SHANNON_API_PORT", "8765")))
